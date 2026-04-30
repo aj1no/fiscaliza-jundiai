@@ -1,0 +1,94 @@
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fiscaliza}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fiscaliza}
+      POSTGRES_DB: ${POSTGRES_DB:-fiscaliza_jundiai}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fiscaliza -d fiscaliza_jundiai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://fiscaliza:fiscaliza@db:5432/fiscaliza_jundiai}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - storage_data:/app/storage
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: celery -A app.tasks.worker:celery_app worker --loglevel=info
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://fiscaliza:fiscaliza@db:5432/fiscaliza_jundiai}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app
+      - storage_data:/app/storage
+
+  scheduler:
+    build: ./backend
+    restart: unless-stopped
+    command: celery -A app.tasks.worker:celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://fiscaliza:fiscaliza@db:5432/fiscaliza_jundiai}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app
+      - storage_data:/app/storage
+
+  frontend:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/usr/share/nginx/html
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  storage_data:

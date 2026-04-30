@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+storage/raw/
+storage/processed/
+*.log
+.env.*
+!.env.example
+venv/
+.env.local
+*.sqlite3
+node_modules/

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fiscaliza Jundiaí | Painel público</title>
+    <meta name="description" content="Painel público para acompanhar documentos oficiais de Jundiaí/SP.">
+    <link rel="stylesheet" href="index.css?v=20260430-3">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <header class="topbar">
+        <div>
+            <p class="eyebrow">Painel público</p>
+            <h1>Fiscaliza Jundiaí</h1>
+        </div>
+        <div class="topbar-actions">
+            <div class="api-status" id="api-status-indicator">
+                <span class="status-dot"></span>
+                <span>API <strong id="status-text">conectando...</strong></span>
+            </div>
+            <button id="btn-collect" class="btn-primary">Executar coleta</button>
+        </div>
+    </header>
+
+    <main>
+        <section class="summary-strip" aria-label="Resumo de documentos por fonte">
+            <article class="summary-card summary-total">
+                <span class="summary-label">Documentos carregados</span>
+                <strong id="total-docs">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Imprensa Oficial</span>
+                <strong id="count-imprensa_oficial">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Câmara Municipal</span>
+                <strong id="count-camara_sessoes">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Portal da Transparência</span>
+                <strong id="count-portal_transparencia">0</strong>
+            </article>
+        </section>
+
+        <section class="filters-bar" aria-label="Filtros de documentos">
+            <label class="field field-search">
+                <span>Busca</span>
+                <input type="search" id="main-search" placeholder="Título, fonte, tipo ou status">
+            </label>
+            <label class="field">
+                <span>Fonte</span>
+                <select id="filter-source">
+                    <option value="">Todas</option>
+                    <option value="imprensa_oficial">Imprensa Oficial</option>
+                    <option value="camara_sessoes">Câmara Municipal</option>
+                    <option value="portal_transparencia">Portal da Transparência</option>
+                </select>
+            </label>
+            <label class="field">
+                <span>Tipo</span>
+                <select id="filter-type">
+                    <option value="">Todos</option>
+                </select>
+            </label>
+            <button id="clear-filters" class="btn-secondary">Limpar</button>
+        </section>
+
+        <section class="results-header">
+            <div>
+                <p class="eyebrow">Documentos oficiais</p>
+                <h2>Registros recentes por fonte</h2>
+            </div>
+            <p id="result-count" class="result-count">Carregando...</p>
+        </section>
+
+        <div id="source-sections" class="source-sections">
+            <div class="loading">Carregando documentos...</div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <p>Dados extraídos de fontes oficiais. A fonte primária continua sendo o órgão público responsável.</p>
+    </footer>
+
+    <script src="app.js?v=20260430-3"></script>
+</body>
+</html>
