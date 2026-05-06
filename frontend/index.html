@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fiscaliza Jundiaí | Painel público</title>
     <meta name="description" content="Painel público para acompanhar documentos oficiais de Jundiaí/SP.">
-    <link rel="stylesheet" href="index.css?v=20260430-3">
+    <link rel="stylesheet" href="index.css?v=20260506-3">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -43,6 +43,59 @@
                 <span class="summary-label">Portal da Transparência</span>
                 <strong id="count-portal_transparencia">0</strong>
             </article>
+        </section>
+
+        <section class="finance-panel" aria-labelledby="finance-title">
+            <div class="finance-header">
+                <div>
+                    <p class="eyebrow">Portal da Transparência</p>
+                    <h2 id="finance-title">Arrecadação e gastos do município</h2>
+                </div>
+                <span class="finance-year" id="finance-year">Ano atual</span>
+            </div>
+
+            <div class="finance-grid">
+                <article class="finance-card finance-revenue">
+                    <span class="finance-label">Arrecadado</span>
+                    <strong id="finance-revenue">Carregando...</strong>
+                    <small id="finance-revenue-note">Receitas coletadas</small>
+                </article>
+                <article class="finance-card finance-expense">
+                    <span class="finance-label">Gasto pago</span>
+                    <strong id="finance-paid">Carregando...</strong>
+                    <small id="finance-expense-note">Despesas por secretaria</small>
+                </article>
+                <article class="finance-card finance-balance">
+                    <span class="finance-label">Saldo simples</span>
+                    <strong id="finance-balance">Carregando...</strong>
+                    <small id="finance-balance-note">Arrecadado menos pago</small>
+                </article>
+            </div>
+
+            <div class="finance-details">
+                <div class="finance-kpis">
+                    <div>
+                        <span>Empenhado</span>
+                        <strong id="finance-committed">--</strong>
+                    </div>
+                    <div>
+                        <span>Liquidado</span>
+                        <strong id="finance-liquidated">--</strong>
+                    </div>
+                    <div>
+                        <span>Pago sobre arrecadado</span>
+                        <strong id="finance-ratio">--</strong>
+                    </div>
+                </div>
+                <div class="finance-ranking">
+                    <div class="ranking-title">
+                        <span>Maiores gastos pagos por secretaria</span>
+                    </div>
+                    <div id="finance-ranking-list" class="ranking-list">
+                        <p>Carregando secretarias...</p>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <section class="filters-bar" aria-label="Filtros de documentos">
@@ -85,6 +138,6 @@
         <p>Dados extraídos de fontes oficiais. A fonte primária continua sendo o órgão público responsável.</p>
     </footer>
 
-    <script src="app.js?v=20260430-3"></script>
+    <script src="app.js?v=20260506-3"></script>
 </body>
 </html>

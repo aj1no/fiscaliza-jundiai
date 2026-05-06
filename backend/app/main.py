@@ -8,6 +8,8 @@ from app.database.database import engine, SessionLocal, get_db
 from app.models import models
 from app.schemas import schemas
 from app.tasks import worker
+from app.analytics import service as analytics_service
+from app.analytics.entity_extractor import seed_reference_data
 from fastapi.middleware.cors import CORSMiddleware
 
 # Garantir que as tabelas sejam criadas ao iniciar (se o banco estiver pronto)
@@ -109,3 +111,82 @@ def search_documents(
     ).limit(50).all()
 
     return results
+
+
+@app.post("/analytics/process")
+def trigger_analytics_processing(limit: Optional[int] = None):
+    task = worker.process_all_entities.delay(limit)
+    return {"message": "Processamento analitico iniciado", "task_id": task.id}
+
+
+@app.get("/analytics/vereadores/{nome}")
+def analytics_vereador(nome: str, db: Session = Depends(get_db)):
+    seed_reference_data(db)
+    return analytics_service.vereador_analytics(db, nome)
+
+
+@app.get("/analytics/gastos/secretaria")
+def analytics_gastos_secretaria(
+    nome: str = Query(..., min_length=1),
+    ano: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    seed_reference_data(db)
+    return analytics_service.gastos_secretaria(db, nome, ano)
+
+
+@app.get("/analytics/gastos/termo")
+def analytics_gastos_termo(
+    termo: str = Query(..., min_length=1),
+    ano: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.gastos_por_termo(db, termo, ano)
+
+
+@app.get("/analytics/gastos/secretarias")
+def analytics_gastos_secretarias(
+    ano: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.gastos_por_secretarias(db, ano)
+
+
+@app.get("/analytics/receitas")
+def analytics_receitas(
+    ano: Optional[int] = None,
+    termo: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.receitas_analytics(db, ano=ano, termo=termo, limit=limit)
+
+
+@app.get("/analytics/temas")
+def analytics_temas(limit: int = 20, db: Session = Depends(get_db)):
+    return analytics_service.temas_frequentes(db, limit=limit)
+
+
+@app.get("/analytics/bairros")
+def analytics_bairros(limit: int = 20, db: Session = Depends(get_db)):
+    return analytics_service.bairros_frequentes(db, limit=limit)
+
+
+@app.get("/analytics/secretarias")
+def analytics_secretarias(
+    tipo_documento: Optional[str] = None,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.secretarias_frequentes(db, tipo_documento=tipo_documento, limit=limit)
+
+
+@app.get("/ask")
+def ask(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
+    seed_reference_data(db)
+    return analytics_service.interpret_question(db, q)
+
+
+@app.get("/rag")
+def rag(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
+    return analytics_service.rag_answer(db, q)

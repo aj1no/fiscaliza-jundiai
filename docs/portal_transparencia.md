@@ -1,77 +1,184 @@
 # Coletor do Portal da Transparencia
 
-## Endpoint publico usado
+Este documento descreve o estado atual do coletor real do Portal da Transparencia de Jundiai.
 
-O coletor usa o endpoint publico:
+## Fonte oficial
 
-`https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorLicitacao`
+- Portal publico: `https://transparencia.jundiai.sp.gov.br/`
+- Sistema de consultas: `https://web21.cijun.sp.gov.br/PMJ/YC/`
 
-Ele foi escolhido porque aparece no HTML da pagina oficial de despesas por licitacao e retorna JSON estruturado, evitando scraping visual. A pagina publica relacionada e:
+O coletor investiga HTML, links e endpoints publicos antes da coleta. Quando existe exportacao CSV oficial, ela e priorizada. Quando nao existe CSV adequado, o coletor usa endpoints JSON/XHR publicos.
 
-`https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/Licitacao`
+## Categorias coletadas
 
-## Parametros conhecidos
+| Tipo de documento | Origem | Formato salvo |
+| --- | --- | --- |
+| `licitacao` | `Despesas/GetDespesaPorLicitacao` | JSON |
+| `despesa_secretaria` | `Despesas/ClassificacaoOrcamentaria` com `tipo_download=CSV` | CSV |
+| `contrato` | `Despesas/GetDespesaPorContrato` | JSON |
+| `receita_classificacao` | `Receitas/GetReceitasPorClassificacao` | JSON |
 
-O endpoint aceita, no minimo:
+## Endpoints principais
 
-- `ano`: exercicio consultado.
-- `licitacao`: numero da licitacao, opcional.
-- `modalidade`: codigo da modalidade; `0` consulta todas.
-- `objeto`: filtro textual sobre a descricao/objeto.
-- `data_inicial`: filtro de data, quando usado pela pagina oficial.
-- `data_final`: filtro de data, quando usado pela pagina oficial.
-- `page`: pagina zero-based.
-- `per_page`: tamanho da pagina. O coletor limita a 100 por chamada.
+### Licitacoes
 
-## Campos retornados
+```text
+https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorLicitacao
+```
 
-Nos testes atuais, cada item de `licitacoes` retorna:
+Parametros usados:
 
+- `ano`
 - `licitacao`
 - `modalidade`
-- `exercicio`
-- `descricao`
-- `codigo_modalidade`
-- `registro_preco`
+- `objeto`
+- `data_inicial`
+- `data_final`
+- `page`
+- `per_page`
 
-O JSON tambem retorna `total_itens`, usado para controlar a paginacao.
+### Despesas por secretaria
 
-## Normalizacao
+O coletor prioriza o CSV oficial da tela "Por Classificacao Orcamentaria":
 
-Cada arquivo bruto salvo em `storage/raw/portal_transparencia` contem:
+```text
+https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/ClassificacaoOrcamentaria
+```
 
-- rastreabilidade da chamada: endpoint, URL final, parametros e status code.
-- `registro_bruto`: item retornado pelo endpoint.
-- `normalizado`: estrutura padronizada com fonte, tipo, titulo, numero da licitacao, modalidade, objeto, ano, orgao, valor, URL de origem e status.
+Parametros usados para CSV:
 
-Campos nao presentes no endpoint, como `orgao`, `valor` e datas especificas, ficam como `null`.
-No JSON bruto, `data_coleta` fica `null` para manter o hash estavel entre execucoes; a data real da coleta fica em `documentos_brutos.data_coleta`.
+- `ano`
+- `data_inicial=1`
+- `data_final=12`
+- `tipo=1`
+- `executaConsulta=true`
+- `per_page=1000000`
+- `tipo_download=CSV`
+- `page=1`
 
-## Configuracao
+Se o CSV falhar, o coletor tenta o endpoint JSON:
 
-Variaveis opcionais:
+```text
+https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesasPorClassificacao
+```
 
-- `PORTAL_TRANSPARENCIA_ANO`: ano consultado. Padrao: ano atual.
-- `PORTAL_TRANSPARENCIA_LIMIT`: limite maximo de registros coletados. Padrao: `100`; teto interno: `1000`.
-- `PORTAL_TRANSPARENCIA_PAGE_SIZE`: tamanho de pagina. Padrao: `100`; teto interno: `100`.
+### Contratos
+
+```text
+https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorContrato
+```
+
+### Receitas por classificacao
+
+```text
+https://web21.cijun.sp.gov.br/PMJ/YC/Receitas/GetReceitasPorClassificacao
+```
+
+## Campos normalizados
+
+O JSON bruto salvo no storage preserva:
+
+- `fonte`
+- `categoria`
+- `rastreabilidade`
+  - endpoint acessado
+  - URL final
+  - parametros enviados
+  - status code
+- `registro_bruto`
+- `normalizado`
+
+Campos normalizados variam por categoria, mas seguem a ideia:
+
+- `fonte`
+- `tipo_documento`
+- `titulo`
+- `ano`
+- `secretaria`
+- `fornecedor`
+- `cnpj`
+- `objeto`
+- `valor_empenhado`
+- `valor_liquidado`
+- `valor_pago`
+- `valor_orcado`
+- `valor_arrecadado`
+- `url_origem`
+- `hash_arquivo`
+- `status_processamento`
+
+Quando o endpoint nao retorna um campo, o valor fica `null`. O coletor nao inventa dados.
+
+## Hash e deduplicacao
+
+A deduplicacao principal e por `hash_arquivo`.
+
+Como fallback, o coletor tambem evita duplicidade por:
+
+```text
+fonte + tipo_documento + url_origem + titulo + data_publicacao
+```
+
+Tambem ha protecao pratica por `url_origem`, importante para registros financeiros que podem ter sido coletados antes por JSON e depois por CSV.
+
+No payload bruto usado para hash, `data_coleta` fica `null` de proposito para manter o hash estavel entre execucoes. A data real da coleta fica salva em `documentos_brutos.data_coleta`.
+
+## Variaveis de ambiente
+
+| Variavel | Padrao | Teto interno | Uso |
+| --- | --- | --- | --- |
+| `PORTAL_TRANSPARENCIA_ANO` | ano atual | 2100 | Exercicio consultado |
+| `PORTAL_TRANSPARENCIA_LIMIT` | 100 | 1000 | Licitacoes |
+| `PORTAL_TRANSPARENCIA_PAGE_SIZE` | 100 | 100 | Tamanho fixo da pagina |
+| `PORTAL_TRANSPARENCIA_DESPESAS_SECRETARIA_LIMIT` | 150 | 500 | Despesas por secretaria |
+| `PORTAL_TRANSPARENCIA_CONTRATOS_LIMIT` | 150 | 500 | Contratos |
+| `PORTAL_TRANSPARENCIA_RECEITAS_LIMIT` | 150 | 500 | Receitas |
 
 ## Execucao manual
 
-Com os containers em execucao:
+Com Docker Compose rodando:
 
 ```bash
 curl -X POST http://localhost:8000/collect/manual
 ```
 
-Para consultar os documentos coletados:
+Consultar documentos do portal:
 
 ```bash
 curl "http://localhost:8000/documents?fonte=portal_transparencia&limit=5"
 ```
 
+Consultar gastos por secretaria:
+
+```bash
+curl "http://localhost:8000/analytics/gastos/secretarias?ano=2026"
+```
+
+Consultar receitas:
+
+```bash
+curl "http://localhost:8000/analytics/receitas?ano=2026"
+```
+
+## Logs esperados
+
+O coletor registra:
+
+- URL acessada;
+- status code;
+- quantidade de links encontrados;
+- endpoints/exportacoes encontrados;
+- categoria coletada;
+- quantidade de registros encontrados;
+- quantidade de registros salvos;
+- duplicados por hash;
+- duplicados por chave composta;
+- erros completos com stack trace.
+
 ## Limitacoes conhecidas
 
-- O MVP coleta a categoria `licitacao`.
-- O endpoint de licitacoes nao retornou, nos testes atuais, valor, orgao ou data especifica por item.
-- O coletor preserva exatamente os dados publicos recebidos e nao tenta contornar anonimizacoes ou mascaramentos.
-- A deduplicacao e feita por `hash_arquivo` e, quando o hash muda por alteracao de rastreabilidade, tambem pela chave composta `fonte + tipo_documento + url_origem + titulo + data_publicacao`.
+- Os valores dependem do que os endpoints publicos retornam.
+- Alguns endpoints nao retornam data especifica por item.
+- Dados anonimizados ou mascarados pela fonte oficial sao preservados.
+- O CSV de despesas por secretaria e agregado, nao uma lista individual de cada pagamento.
+- O painel financeiro usa esses agregados por secretaria para facilitar leitura publica.

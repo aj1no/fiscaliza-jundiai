@@ -1,41 +1,95 @@
-# Arquitetura do Projeto - Fiscaliza Jundiaí
+# Arquitetura do Projeto - Fiscaliza Jundiai
 
-O projeto "Fiscaliza Jundiaí" é uma plataforma de transparência pública composta por um ecossistema de coleta, processamento e disponibilização de dados.
+O Fiscaliza Jundiai e uma aplicacao Docker Compose para coleta, processamento, busca e visualizacao de dados publicos oficiais do municipio.
 
-## Componentes Principais
+## Componentes principais
 
-### 1. Backend (FastAPI + Python)
-- **API**: Endpoints REST para consulta de documentos, gastos, vereadores e dashboards.
-- **Collectors**: Módulos especializados em realizar o scraping de fontes oficiais.
-- **Processors**: Motores de extração de texto (PDF/HTML), classificação por temas e extração de entidades (NLP).
-- **Database**: PostgreSQL para armazenamento estruturado e busca textual.
-- **Tasks**: Agendamento de coletas periódicas.
+### Frontend
 
-### 2. Frontend (Next.js / React)
-- Interface moderna e responsiva.
-- Dashboards dinâmicos com gráficos de evolução de gastos e proposições.
-- Sistema de busca avançada com filtros.
-- Páginas dedicadas para Executivo, Legislativo e Imprensa Oficial.
+- HTML, CSS e JavaScript estaticos.
+- Servido por Nginx.
+- Painel publico em `http://localhost:8080`.
+- Consome a API FastAPI em `http://localhost:8000`.
+- Exibe documentos, filtros, busca, paginacao e indicadores financeiros.
 
-### 3. Banco de Dados (PostgreSQL)
-- Estrutura relacional para normalização de dados de fontes distintas.
-- Uso de Full-Text Search para busca rápida em conteúdos de documentos.
+### Backend
 
-## Fluxo de Dados
-1. **Coleta**: Crawlers acessam as fontes oficiais periodicamente.
-2. **Ingestão**: Os dados brutos são salvos e os arquivos (PDFs) são baixados.
-3. **Processamento**: 
-   - Extração de texto.
-   - Classificação automática (Saúde, Educação, etc.).
-   - Identificação de entidades (Vereadores, Empresas, Bairros).
-4. **Armazenamento**: Dados processados são indexados no banco.
-5. **Consumo**: Usuários acessam via interface web.
+- FastAPI.
+- Endpoints REST para documentos, busca, coleta manual e analytics.
+- Cria tabelas no startup via SQLAlchemy para o MVP.
+- Expoe Swagger em `/docs`.
 
-## Stack Técnica
-- **Linguagem**: Python 3.x
-- **Framework Web**: FastAPI
-- **Frontend**: Next.js + CSS Vanilla (Premium Design)
-- **DB**: PostgreSQL
-- **NLP**: spaCy / Regex
-- **Scraping**: BeautifulSoup, Requests, Playwright (se necessário)
-- **DevOps**: Docker + Docker Compose
+### Banco de dados
+
+- PostgreSQL.
+- Guarda documentos brutos, documentos processados, logs de coleta e tabelas analiticas.
+- O volume `postgres_data` preserva os dados locais entre reinicios.
+
+### Fila e processamento
+
+- Redis como broker.
+- Celery worker para coletas e processamento de documentos.
+- Celery beat para agendamento:
+  - Imprensa Oficial: a cada 6 horas.
+  - Camara/SAPL: a cada 12 horas.
+  - Portal da Transparencia: diariamente as 03:00.
+
+### Storage
+
+- Arquivos brutos ficam em `storage/raw/` dentro do volume Docker.
+- O `.gitignore` evita subir arquivos coletados para o repositorio.
+
+## Fluxo de dados
+
+```text
+Frontend -> FastAPI -> Celery -> Coletores -> Storage/Banco -> Processamento -> Busca/Analytics -> Frontend
+```
+
+1. O usuario acessa o painel ou dispara `/collect/manual`.
+2. A API enfileira tarefas no Celery.
+3. Os coletores acessam fontes oficiais.
+4. Documentos brutos sao salvos em banco e storage.
+5. O worker processa PDF, HTML, JSON e CSV.
+6. O texto extraido alimenta busca e analytics.
+7. O frontend consulta endpoints para exibir documentos e indicadores.
+
+## Fontes integradas
+
+- Imprensa Oficial: PDF.
+- Camara Municipal/SAPL: HTML.
+- Portal da Transparencia: JSON e CSV.
+
+## Endpoints principais
+
+- `GET /health`
+- `POST /collect/manual`
+- `GET /documents`
+- `GET /search`
+- `GET /analytics/receitas`
+- `GET /analytics/gastos/secretarias`
+- `GET /analytics/gastos/secretaria`
+- `GET /analytics/gastos/termo`
+- `GET /ask`
+- `GET /rag`
+
+## Stack tecnica
+
+- Python 3.11
+- FastAPI
+- SQLAlchemy
+- PostgreSQL 15
+- Redis
+- Celery
+- BeautifulSoup
+- Requests
+- Nginx
+- HTML/CSS/JavaScript
+- Docker Compose
+
+## Decisoes do MVP
+
+- Sem dados simulados.
+- Coletas reais com logs e tratamento de erro.
+- Frontend estatico para reduzir complexidade.
+- Processamento textual local antes de qualquer camada de IA externa.
+- Links oficiais preservados para auditoria.

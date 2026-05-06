@@ -132,3 +132,20 @@ class Despesa(Base):
     criado_em = Column(DateTime, default=datetime.utcnow)
 
     fonte_documento = relationship("DocumentoBruto")
+
+
+class Receita(Base):
+    __tablename__ = "receitas"
+    id = Column(Integer, primary_key=True, index=True)
+    fonte_documento_id = Column(Integer, ForeignKey("documentos_brutos.id"), index=True)
+    ano = Column(Integer, index=True)
+    classificacao = Column(String(255), index=True)
+    descricao = Column(Text)
+    valor_orcado = Column(Float)
+    valor_arrecadado = Column(Float)
+    percentual = Column(Float)
+    data_referencia = Column(DateTime)
+    url_origem = Column(String(500))
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    fonte_documento = relationship("DocumentoBruto")

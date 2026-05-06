@@ -1,4 +1,5 @@
 import logging
+import csv
 import json
 import os
 import re
@@ -109,6 +110,23 @@ def _extract_html_text(file_path):
     return soup.get_text(" ", strip=True)
 
 
+def _extract_csv_text(file_path):
+    parts = []
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+            reader = csv.DictReader(f, dialect=dialect)
+        except csv.Error:
+            reader = csv.DictReader(f, delimiter=";")
+        for row in reader:
+            for key, value in row.items():
+                if value not in (None, ""):
+                    parts.append(f"{key}: {value}")
+    return " ".join(parts)
+
+
 def extract_text_from_json(data: dict) -> str:
     ignored_keys = {
         "id",
@@ -207,6 +225,8 @@ def process_document(doc_id):
             texto = _extract_html_text(doc.caminho_arquivo)
         elif formato == "json":
             texto = _extract_json_text(doc.caminho_arquivo)
+        elif formato == "csv":
+            texto = _extract_csv_text(doc.caminho_arquivo)
         else:
             raise ValueError(f"Formato nao suportado para processamento: {doc.formato}")
 
@@ -238,6 +258,18 @@ def process_document(doc_id):
         doc.erro_processamento = None
         doc.atualizado_em = datetime.utcnow()
         db.commit()
+
+        try:
+            from app.analytics.entity_extractor import extract_entities_for_document
+
+            processed = db.query(models.DocumentoProcessado).filter(
+                models.DocumentoProcessado.documento_bruto_id == doc.id
+            ).first()
+            if processed:
+                extract_entities_for_document(db, processed)
+        except Exception as analytics_error:
+            logger.error("Erro ao extrair entidades do documento %s: %s", doc_id, analytics_error)
+
         logger.info("Documento %s processado com %s caracteres", doc_id, len(texto_limpo))
         return f"Documento {doc_id} processado"
     except Exception as e:
@@ -273,3 +305,40 @@ def process_unprocessed_documents():
         process_document.delay(doc_id)
 
     return f"{len(doc_ids)} documentos enfileirados para processamento"
+
+
+@celery_app.task(name="process_document_entities")
+def process_document_entities(processed_doc_id):
+    from app.analytics.entity_extractor import extract_entities_for_document
+
+    db = SessionLocal()
+    try:
+        processed = db.query(models.DocumentoProcessado).get(processed_doc_id)
+        if not processed:
+            return "Documento processado nao encontrado"
+        extract_entities_for_document(db, processed)
+        return f"Entidades extraidas para documento processado {processed_doc_id}"
+    except Exception as e:
+        logger.error("Erro em process_document_entities %s: %s", processed_doc_id, e)
+        db.rollback()
+        return f"Erro: {str(e)}"
+    finally:
+        db.close()
+
+
+@celery_app.task(name="process_all_entities")
+def process_all_entities(limit=None):
+    from app.analytics.entity_extractor import extract_entities_for_all
+
+    db = SessionLocal()
+    try:
+        logger.info("Iniciando process_all_entities limit=%s", limit)
+        count = extract_entities_for_all(db, limit=limit)
+        logger.info("process_all_entities finalizado: %s documentos", count)
+        return f"Entidades extraidas para {count} documentos processados"
+    except Exception as e:
+        logger.error("Erro em process_all_entities: %s", e)
+        db.rollback()
+        return f"Erro: {str(e)}"
+    finally:
+        db.close()

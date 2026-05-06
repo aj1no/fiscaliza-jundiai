@@ -1,6 +1,7 @@
 const API_URL = 'http://localhost:8000';
 const DOCUMENT_LIMIT = 500;
 const PAGE_SIZE = 10;
+const FINANCIAL_YEAR = new Date().getFullYear();
 
 const SOURCES = [
     {
@@ -25,6 +26,11 @@ const state = {
     filtered: [],
     pages: {},
     loading: true,
+};
+
+const financeState = {
+    expenseRows: [],
+    expanded: false,
 };
 
 function getElement(id) {
@@ -60,10 +66,42 @@ function formatDate(doc) {
     return date.toLocaleDateString('pt-BR');
 }
 
+function formatMoney(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return 'Sem dado';
+    }
+
+    return Number(value).toLocaleString('pt-BR', {
+        style: 'currency',
+        currency: 'BRL',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    });
+}
+
+function formatPercent(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+        return '--';
+    }
+
+    return `${Number(value).toLocaleString('pt-BR', {
+        maximumFractionDigits: 1,
+        minimumFractionDigits: 1,
+    })}%`;
+}
+
 function normalizeDocuments(payload) {
     if (Array.isArray(payload)) return payload;
     if (Array.isArray(payload?.value)) return payload.value;
     return [];
+}
+
+async function fetchJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Falha na requisição ${url}: ${response.status}`);
+    }
+    return response.json();
 }
 
 async function checkHealth() {
@@ -92,6 +130,151 @@ async function fetchDocumentsBySource(sourceId) {
         throw new Error(`Falha ao buscar ${sourceId}: ${response.status}`);
     }
     return normalizeDocuments(await response.json());
+}
+
+async function loadFinancialSummary() {
+    getElement('finance-year').textContent = `Ano ${FINANCIAL_YEAR}`;
+
+    try {
+        const [revenues, expenses] = await Promise.all([
+            fetchJson(`${API_URL}/analytics/receitas?ano=${FINANCIAL_YEAR}&limit=2000`),
+            fetchJson(`${API_URL}/analytics/gastos/secretarias?ano=${FINANCIAL_YEAR}`),
+        ]);
+        renderFinancialSummary(revenues, expenses);
+    } catch (error) {
+        console.error(error);
+        renderFinancialError();
+    }
+}
+
+function renderFinancialSummary(revenues, expenses) {
+    const revenueSummary = calculateRevenueSummary(revenues?.registros || []);
+    const expenseRows = Array.isArray(expenses?.secretarias) ? expenses.secretarias : [];
+    financeState.expenseRows = expenseRows;
+    financeState.expanded = false;
+
+    const totals = calculateExpenseTotals(expenseRows);
+    const balance = revenueSummary.collected === null || totals.paid === null
+        ? null
+        : revenueSummary.collected - totals.paid;
+    const paidRatio = revenueSummary.collected && totals.paid !== null
+        ? (totals.paid / revenueSummary.collected) * 100
+        : null;
+
+    getElement('finance-revenue').textContent = formatMoney(revenueSummary.collected);
+    getElement('finance-paid').textContent = formatMoney(totals.paid);
+    getElement('finance-balance').textContent = formatMoney(balance);
+    getElement('finance-committed').textContent = formatMoney(totals.committed);
+    getElement('finance-liquidated').textContent = formatMoney(totals.liquidated);
+    getElement('finance-ratio').textContent = formatPercent(paidRatio);
+
+    getElement('finance-revenue-note').textContent = revenueSummary.usesTopLevel
+        ? 'Rubricas de topo coletadas'
+        : 'Soma dos registros coletados';
+    getElement('finance-expense-note').textContent = `${expenseRows.length} secretaria${expenseRows.length === 1 ? '' : 's'} com despesa`;
+    getElement('finance-balance-note').textContent = balance === null
+        ? 'Aguardando dados oficiais'
+        : 'Arrecadado menos gasto pago';
+    renderFinanceRanking();
+}
+
+function calculateRevenueSummary(rows) {
+    const topLevelRows = rows.filter((row) => /^\d0{14}$/.test(String(row.classificacao || '')));
+    const usableRows = topLevelRows.length ? topLevelRows : rows;
+    const collectedValues = usableRows
+        .map((row) => Number(row.valor_arrecadado))
+        .filter((value) => Number.isFinite(value));
+
+    return {
+        collected: collectedValues.length ? collectedValues.reduce((sum, value) => sum + value, 0) : null,
+        usesTopLevel: topLevelRows.length > 0,
+    };
+}
+
+function calculateExpenseTotals(rows) {
+    const sumField = (field) => {
+        const values = rows
+            .map((row) => Number(row[field]))
+            .filter((value) => Number.isFinite(value));
+        return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+    };
+
+    return {
+        committed: sumField('total_empenhado'),
+        liquidated: sumField('total_liquidado'),
+        paid: sumField('total_pago'),
+    };
+}
+
+function renderFinanceRanking() {
+    const ranked = [...financeState.expenseRows]
+        .filter((row) => Number.isFinite(Number(row.total_pago)) || Number.isFinite(Number(row.total_empenhado)))
+        .sort((a, b) => (Number(b.total_pago) || Number(b.total_empenhado) || 0) - (Number(a.total_pago) || Number(a.total_empenhado) || 0));
+
+    const container = getElement('finance-ranking-list');
+    if (!ranked.length) {
+        container.innerHTML = '<p>Nenhuma secretaria com valor estruturado ainda.</p>';
+        return;
+    }
+
+    const visibleRows = financeState.expanded ? ranked : ranked.slice(0, 5);
+    const toggleButton = ranked.length > 5
+        ? `
+            <button class="ranking-toggle" data-action="toggle-expenses" type="button">
+                ${financeState.expanded ? 'Mostrar top 5' : `Ver todas as ${ranked.length} secretarias`}
+            </button>
+        `
+        : '';
+    const summary = financeState.expanded
+        ? `Listando todas as ${ranked.length} secretarias com valores estruturados`
+        : `Mostrando as 5 maiores de ${ranked.length} secretarias`;
+
+    container.innerHTML = `
+        <div class="ranking-summary">
+            <span>${escapeHtml(summary)}</span>
+            ${toggleButton}
+        </div>
+        ${visibleRows.map((row, index) => renderFinanceRankingItem(row, index)).join('')}
+    `;
+}
+
+function renderFinanceRankingItem(row, index) {
+    const href = row.url_origem || '#';
+    const hasLink = Boolean(row.url_origem);
+
+    return `
+        <article class="ranking-item">
+            <span class="ranking-position">${index + 1}</span>
+            <div class="ranking-content">
+                <strong>${escapeHtml(row.secretaria || 'Secretaria não informada')}</strong>
+                <div class="ranking-values">
+                    <span>
+                        <small>Pago</small>
+                        <b>${escapeHtml(formatMoney(row.total_pago))}</b>
+                    </span>
+                    <span>
+                        <small>Liquidado</small>
+                        <b>${escapeHtml(formatMoney(row.total_liquidado))}</b>
+                    </span>
+                    <span>
+                        <small>Empenhado</small>
+                        <b>${escapeHtml(formatMoney(row.total_empenhado))}</b>
+                    </span>
+                </div>
+            </div>
+            <a class="${hasLink ? '' : 'disabled'}" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Origem</a>
+        </article>
+    `;
+}
+
+function renderFinancialError() {
+    getElement('finance-revenue').textContent = 'Sem dado';
+    getElement('finance-paid').textContent = 'Sem dado';
+    getElement('finance-balance').textContent = 'Sem dado';
+    getElement('finance-revenue-note').textContent = 'Não foi possível carregar';
+    getElement('finance-expense-note').textContent = 'Não foi possível carregar';
+    getElement('finance-balance-note').textContent = 'Verifique a API';
+    getElement('finance-ranking-list').innerHTML = '<p>Não foi possível carregar os gastos por secretaria.</p>';
 }
 
 async function loadDocuments() {
@@ -320,7 +503,10 @@ async function triggerCollect() {
         const response = await fetch(`${API_URL}/collect/manual`, { method: 'POST' });
         if (!response.ok) throw new Error(`Status ${response.status}`);
         button.textContent = 'Coleta enviada';
-        setTimeout(loadDocuments, 3000);
+        setTimeout(() => {
+            loadFinancialSummary();
+            loadDocuments();
+        }, 3000);
     } catch (error) {
         console.error(error);
         button.textContent = 'Falha ao enviar';
@@ -343,6 +529,13 @@ function bindEvents() {
         applyFilters();
     });
     getElement('btn-collect').addEventListener('click', triggerCollect);
+    getElement('finance-ranking-list').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-action="toggle-expenses"]');
+        if (!button) return;
+
+        financeState.expanded = !financeState.expanded;
+        renderFinanceRanking();
+    });
     getElement('source-sections').addEventListener('click', (event) => {
         const button = event.target.closest('.pagination-btn');
         if (!button || button.disabled) return;
@@ -366,6 +559,7 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     checkHealth();
+    loadFinancialSummary();
     loadDocuments();
     setInterval(checkHealth, 30000);
 });

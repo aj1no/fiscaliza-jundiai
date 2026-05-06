@@ -232,6 +232,260 @@ h4 {
     letter-spacing: -0.04em;
 }
 
+.finance-panel {
+    padding: 18px;
+    margin: 0 0 18px;
+    background: linear-gradient(180deg, rgba(17, 28, 41, 0.92), rgba(10, 17, 26, 0.92));
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+}
+
+.finance-header {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 16px;
+}
+
+.finance-year {
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 0 12px;
+    color: #06111e;
+    background: var(--green);
+    border-radius: 8px;
+    font-weight: 900;
+    white-space: nowrap;
+}
+
+.finance-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.finance-card {
+    min-height: 154px;
+    padding: 18px;
+    background: rgba(22, 36, 53, 0.82);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.finance-revenue {
+    border-color: rgba(68, 215, 168, 0.28);
+    background: linear-gradient(180deg, rgba(68, 215, 168, 0.13), rgba(22, 36, 53, 0.88));
+}
+
+.finance-expense {
+    border-color: rgba(255, 196, 93, 0.28);
+    background: linear-gradient(180deg, rgba(255, 196, 93, 0.12), rgba(22, 36, 53, 0.88));
+}
+
+.finance-balance {
+    border-color: rgba(124, 194, 255, 0.28);
+    background: linear-gradient(180deg, rgba(77, 163, 255, 0.13), rgba(22, 36, 53, 0.88));
+}
+
+.finance-label {
+    display: block;
+    color: var(--muted);
+    font-size: 0.74rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.finance-card strong {
+    display: block;
+    margin: 13px 0 9px;
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: 1.72rem;
+    line-height: 1.08;
+}
+
+.finance-card small,
+.finance-kpis span,
+.ranking-item small,
+.ranking-list p {
+    color: var(--muted);
+}
+
+.finance-details {
+    display: grid;
+    grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.15fr);
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.finance-kpis {
+    display: grid;
+    gap: 10px;
+}
+
+.finance-kpis div,
+.finance-ranking {
+    padding: 14px;
+    background: rgba(10, 17, 26, 0.72);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+.finance-kpis div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.finance-kpis strong {
+    color: var(--text);
+    text-align: right;
+}
+
+.ranking-title {
+    margin-bottom: 10px;
+    color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 900;
+}
+
+.ranking-list {
+    display: grid;
+    gap: 8px;
+}
+
+.ranking-list p {
+    margin: 0;
+}
+
+.ranking-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 2px 0 4px;
+}
+
+.ranking-summary span {
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 800;
+}
+
+.ranking-toggle {
+    min-height: 34px;
+    padding: 0 12px;
+    color: #06111e;
+    background: var(--primary-strong);
+    border: 1px solid var(--primary-strong);
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-weight: 900;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ranking-toggle:hover {
+    transform: translateY(-1px);
+}
+
+.ranking-item {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px;
+    background: rgba(22, 36, 53, 0.82);
+    border: 1px solid rgba(178, 202, 228, 0.1);
+    border-radius: 8px;
+}
+
+.ranking-position {
+    display: inline-grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    color: #06111e;
+    background: var(--primary-strong);
+    border-radius: 8px;
+    font-weight: 900;
+}
+
+.ranking-item strong {
+    display: block;
+    overflow-wrap: anywhere;
+    font-size: 0.9rem;
+    line-height: 1.25;
+}
+
+.ranking-content {
+    display: grid;
+    gap: 8px;
+}
+
+.ranking-values {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+}
+
+.ranking-values span {
+    min-width: 0;
+    padding: 8px;
+    background: rgba(10, 17, 26, 0.46);
+    border: 1px solid rgba(178, 202, 228, 0.08);
+    border-radius: 8px;
+}
+
+.ranking-values small,
+.ranking-values b {
+    display: block;
+}
+
+.ranking-values small {
+    margin-bottom: 2px;
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.ranking-values b {
+    overflow-wrap: anywhere;
+    color: var(--text);
+    font-size: 0.86rem;
+}
+
+.ranking-item a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 10px;
+    color: var(--primary-strong);
+    text-decoration: none;
+    background: rgba(77, 163, 255, 0.08);
+    border: 1px solid rgba(77, 163, 255, 0.2);
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-weight: 900;
+}
+
+.ranking-item a:hover {
+    color: #ffffff;
+    border-color: rgba(124, 194, 255, 0.7);
+}
+
+.ranking-item a.disabled {
+    pointer-events: none;
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.04);
+}
+
 .filters-bar {
     display: grid;
     grid-template-columns: minmax(260px, 1fr) 220px 220px auto;
@@ -496,6 +750,11 @@ h4 {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
+    .finance-grid,
+    .finance-details {
+        grid-template-columns: 1fr;
+    }
+
     .filters-bar {
         grid-template-columns: 1fr 1fr;
     }
@@ -513,7 +772,8 @@ h4 {
 
     .topbar-actions,
     .results-header,
-    .source-header {
+    .source-header,
+    .finance-header {
         align-items: stretch;
         flex-direction: column;
     }
@@ -522,6 +782,28 @@ h4 {
     .filters-bar,
     .document-card,
     .pagination-row {
+        grid-template-columns: 1fr;
+    }
+
+    .ranking-item {
+        grid-template-columns: 30px minmax(0, 1fr);
+    }
+
+    .ranking-item a {
+        grid-column: 2;
+        justify-content: center;
+    }
+
+    .ranking-summary {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .ranking-toggle {
+        width: 100%;
+    }
+
+    .ranking-values {
         grid-template-columns: 1fr;
     }
 

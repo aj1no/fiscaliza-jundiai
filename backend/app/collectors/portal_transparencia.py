@@ -1,4 +1,6 @@
 import hashlib
+import csv
+import io
 import json
 import logging
 import os
@@ -21,11 +23,19 @@ class PortalTransparenciaCollector:
     MENU_LINKS_URL = "https://web.cijun.sp.gov.br/PMJ/MI/V1/Links?"
     LICITACOES_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/Licitacao"
     LICITACOES_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorLicitacao"
+    DESPESAS_CLASSIFICACAO_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/ClassificacaoOrcamentaria"
+    DESPESAS_CLASSIFICACAO_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesasPorClassificacao"
+    CONTRATOS_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/Contrato"
+    CONTRATOS_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorContrato"
+    RECEITAS_CLASSIFICACAO_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Receitas/ClassificacaoOrcamentaria"
+    RECEITAS_CLASSIFICACAO_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Receitas/GetReceitasPorClassificacao"
     STORAGE_PATH = "storage/raw/portal_transparencia"
     DEFAULT_LIMIT = 100
     DEFAULT_PAGE_SIZE = 100
     MAX_PAGE_SIZE = 100
     MAX_LIMIT = 1000
+    DEFAULT_FINANCIAL_LIMIT = 150
+    MAX_FINANCIAL_LIMIT = 500
 
     def __init__(self):
         os.makedirs(self.STORAGE_PATH, exist_ok=True)
@@ -125,6 +135,24 @@ class PortalTransparenciaCollector:
                 1,
                 self.MAX_PAGE_SIZE,
             ),
+            "despesas_secretaria_limit": self._env_int(
+                "PORTAL_TRANSPARENCIA_DESPESAS_SECRETARIA_LIMIT",
+                self.DEFAULT_FINANCIAL_LIMIT,
+                1,
+                self.MAX_FINANCIAL_LIMIT,
+            ),
+            "contratos_limit": self._env_int(
+                "PORTAL_TRANSPARENCIA_CONTRATOS_LIMIT",
+                self.DEFAULT_FINANCIAL_LIMIT,
+                1,
+                self.MAX_FINANCIAL_LIMIT,
+            ),
+            "receitas_limit": self._env_int(
+                "PORTAL_TRANSPARENCIA_RECEITAS_LIMIT",
+                self.DEFAULT_FINANCIAL_LIMIT,
+                1,
+                self.MAX_FINANCIAL_LIMIT,
+            ),
         }
 
     def _licitacoes_params(self, year, page, per_page):
@@ -200,23 +228,29 @@ class PortalTransparenciaCollector:
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
 
-    def _save_raw_file(self, content_hash, raw_bytes):
-        file_path = os.path.join(self.STORAGE_PATH, f"{content_hash}.json")
+    def _save_raw_file(self, content_hash, raw_bytes, extension="json"):
+        file_path = os.path.join(self.STORAGE_PATH, f"{content_hash}.{extension}")
         if not os.path.exists(file_path):
             with open(file_path, "wb") as file:
                 file.write(raw_bytes)
         return file_path
 
-    def _duplicate_reason(self, db, content_hash, url, title, publication_date):
+    def _duplicate_reason(self, db, content_hash, url, title, publication_date, tipo_documento="licitacao"):
         hash_duplicate = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.hash_arquivo == content_hash
         ).first()
         if hash_duplicate:
             return "hash"
 
+        url_duplicate = db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.url_origem == url
+        ).first()
+        if url_duplicate:
+            return "chave_composta"
+
         query = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.fonte == "portal_transparencia",
-            models.DocumentoBruto.tipo_documento == "licitacao",
+            models.DocumentoBruto.tipo_documento == tipo_documento,
             models.DocumentoBruto.url_origem == url,
             models.DocumentoBruto.titulo == title,
         )
@@ -271,6 +305,424 @@ class PortalTransparenciaCollector:
             page += 1
 
         return fetched, total_items, requests_info
+
+    def _fetch_expense_summary_csv(self, config):
+        params = {
+            "ano": str(config["ano"]),
+            "data_inicial": "1",
+            "data_final": "12",
+            "tipo": "1",
+            "executaConsulta": "true",
+            "per_page": "1000000",
+            "tipo_download": "CSV",
+            "page": "1",
+        }
+        response = self._fetch(self.DESPESAS_CLASSIFICACAO_PAGE_URL, params=params)
+        csv_text = response.content.decode("utf-8-sig", errors="ignore")
+        rows = list(csv.DictReader(io.StringIO(csv_text), delimiter=";"))
+        return rows, params, response
+
+    def _csv_row_bytes(self, row):
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=list(row.keys()), delimiter=";", lineterminator="\n")
+        writer.writeheader()
+        writer.writerow(row)
+        return output.getvalue().encode("utf-8")
+
+    def _raw_payload_generic(self, category, endpoint, record, params, response_url, status_code, normalized):
+        payload = {
+            "fonte": "portal_transparencia",
+            "categoria": category,
+            "rastreabilidade": {
+                "endpoint": endpoint,
+                "url_consulta": response_url,
+                "parametros_consulta": params,
+                "status_code": status_code,
+            },
+            "normalizado": normalized,
+            "registro_bruto": record,
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+
+    def _save_portal_document(
+        self,
+        db,
+        category,
+        tipo_documento,
+        title,
+        public_url,
+        normalized,
+        record,
+        params,
+        response_url,
+        status_code,
+        endpoint,
+        publication_date=None,
+    ):
+        normalized_for_hash = dict(normalized)
+        normalized_for_hash["hash_arquivo"] = None
+        normalized_for_hash["data_coleta"] = None
+        raw_bytes = self._raw_payload_generic(
+            category,
+            endpoint,
+            record,
+            params,
+            response_url,
+            status_code,
+            normalized_for_hash,
+        )
+        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+        duplicate_reason = self._duplicate_reason(
+            db,
+            content_hash,
+            public_url,
+            title,
+            publication_date,
+            tipo_documento=tipo_documento,
+        )
+        if duplicate_reason:
+            logger.info(
+                "[DUPLICADO] Portal Transparencia %s por %s: %s | endpoint=%s | params=%s | hash=%s",
+                tipo_documento,
+                duplicate_reason,
+                title,
+                endpoint,
+                params,
+                content_hash,
+            )
+            return duplicate_reason
+
+        normalized["hash_arquivo"] = content_hash
+        file_path = self._save_raw_file(content_hash, raw_bytes)
+        db.add(models.DocumentoBruto(
+            fonte="portal_transparencia",
+            tipo_documento=tipo_documento,
+            titulo=title[:255],
+            url_origem=public_url,
+            data_publicacao=publication_date,
+            data_coleta=datetime.utcnow(),
+            formato="json",
+            caminho_arquivo=file_path,
+            hash_arquivo=content_hash,
+            hash_texto=None,
+            status_processamento="coletado",
+            erro_processamento=None,
+        ))
+        db.commit()
+        logger.info(
+            "[SALVO] Portal Transparencia %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
+            tipo_documento,
+            title,
+            endpoint,
+            params,
+            status_code,
+            content_hash,
+        )
+        return "salvo"
+
+    def _save_portal_csv_row_document(
+        self,
+        db,
+        tipo_documento,
+        title,
+        public_url,
+        normalized,
+        row,
+        params,
+        response_url,
+        status_code,
+        endpoint,
+        publication_date=None,
+    ):
+        raw_bytes = self._csv_row_bytes(row)
+        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+        duplicate_reason = self._duplicate_reason(
+            db,
+            content_hash,
+            public_url,
+            title,
+            publication_date,
+            tipo_documento=tipo_documento,
+        )
+        if duplicate_reason:
+            logger.info(
+                "[DUPLICADO] Portal Transparencia CSV %s por %s: %s | endpoint=%s | params=%s | hash=%s",
+                tipo_documento,
+                duplicate_reason,
+                title,
+                endpoint,
+                params,
+                content_hash,
+            )
+            return duplicate_reason
+
+        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
+        db.add(models.DocumentoBruto(
+            fonte="portal_transparencia",
+            tipo_documento=tipo_documento,
+            titulo=title[:255],
+            url_origem=public_url,
+            data_publicacao=publication_date,
+            data_coleta=datetime.utcnow(),
+            formato="csv",
+            caminho_arquivo=file_path,
+            hash_arquivo=content_hash,
+            hash_texto=None,
+            status_processamento="coletado",
+            erro_processamento=None,
+        ))
+        db.commit()
+        logger.info(
+            "[SALVO] Portal Transparencia CSV %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
+            tipo_documento,
+            title,
+            endpoint,
+            params,
+            status_code,
+            content_hash,
+        )
+        return "salvo"
+
+    def _normalize_expense_summary(self, record, year, title, public_url):
+        return {
+            "fonte": "portal_transparencia",
+            "tipo_documento": "despesa_secretaria",
+            "titulo": title,
+            "ano": year,
+            "codigo_secretaria": record.get("secretaria") or record.get("codigo_secretaria"),
+            "secretaria": record.get("descricao") or record.get("descricao_secretaria"),
+            "objeto": "Despesa por classificacao orcamentaria agrupada por secretaria",
+            "valor_inicial": record.get("valor_inicial") or record.get("dotacao_inicial"),
+            "creditos": record.get("creditos") or record.get("credito_adicional"),
+            "dotacao": record.get("dotacao") or record.get("dotacao_atual"),
+            "valor_empenhado": record.get("empenhado"),
+            "valor_liquidado": record.get("liquidado"),
+            "valor_pago": record.get("pago"),
+            "data_inicio": record.get("data_inicio"),
+            "data_fim": record.get("data_fim"),
+            "url_origem": public_url,
+            "hash_arquivo": None,
+            "data_coleta": None,
+            "status_processamento": "coletado",
+        }
+
+    def _normalize_contract(self, record, year, title, public_url):
+        return {
+            "fonte": "portal_transparencia",
+            "tipo_documento": "contrato",
+            "titulo": title,
+            "ano": int(record.get("ano_contrato") or year),
+            "codigo_secretaria": record.get("codigo_Secretaria"),
+            "secretaria": record.get("desc_dotacao"),
+            "fornecedor": record.get("nome_fornecedor"),
+            "cnpj": record.get("cnpj") or record.get("cpf_cnpj"),
+            "objeto": record.get("desc_resu_contrato"),
+            "numero_contrato": record.get("numero_contrato"),
+            "tipo_contrato": record.get("tipo_contrato"),
+            "data_assinatura": record.get("data_ass_contrato"),
+            "data_fim_prevista": record.get("data_prev_final"),
+            "valor_original_contrato": record.get("valor_original_contrato"),
+            "valor_aditado_contrato": record.get("valor_aditado_contrato"),
+            "valor_atual_contrato": record.get("valor_atual_contrato"),
+            "numero_empenho": record.get("numero_empenho"),
+            "data_empenho": record.get("data_empenho"),
+            "valor_empenhado": record.get("valor_empenho"),
+            "saldo_empenho": record.get("saldo_empenho"),
+            "url_origem": public_url,
+            "hash_arquivo": None,
+            "data_coleta": None,
+            "status_processamento": "coletado",
+        }
+
+    def _normalize_revenue(self, record, year, title, public_url):
+        return {
+            "fonte": "portal_transparencia",
+            "tipo_documento": "receita_classificacao",
+            "titulo": title,
+            "ano": year,
+            "classificacao": record.get("rubrica_receita"),
+            "descricao": record.get("descricao"),
+            "situacao": record.get("situacao"),
+            "valor_orcado": record.get("orcado"),
+            "valor_arrecadado": record.get("arrecadado"),
+            "percentual": record.get("percentual"),
+            "url_origem": public_url,
+            "hash_arquivo": None,
+            "data_coleta": None,
+            "status_processamento": "coletado",
+        }
+
+    def _collect_expense_summaries(self, db, config):
+        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        try:
+            try:
+                records, params, response = self._fetch_expense_summary_csv(config)
+                endpoint = self.DESPESAS_CLASSIFICACAO_PAGE_URL
+                using_csv = True
+                logger.info(
+                    "Portal Transparencia usando CSV oficial para despesas por secretaria: url=%s registros=%s",
+                    response.url,
+                    len(records),
+                )
+            except Exception as csv_error:
+                logger.warning(
+                    "Falha ao baixar CSV de despesas por secretaria; usando JSON como fallback: %s",
+                    csv_error,
+                )
+                params = {
+                    "ano": str(config["ano"]),
+                    "data_inicial": "1",
+                    "data_final": "12",
+                    "tipo": "1",
+                    "page": "1",
+                }
+                response = self._fetch(self.DESPESAS_CLASSIFICACAO_API_URL, params=params)
+                data = response.json()
+                records = data.get("retorno", []) if isinstance(data, dict) else []
+                endpoint = self.DESPESAS_CLASSIFICACAO_API_URL
+                using_csv = False
+
+            stats["encontrado"] = len(records)
+            for record in records[:config["despesas_secretaria_limit"]]:
+                secretaria = record.get("descricao") or record.get("descricao_secretaria") or "Secretaria nao informada"
+                code = record.get("secretaria") or record.get("codigo_secretaria") or "0"
+                title = f"Despesa {config['ano']} - {secretaria}"
+                public_url = (
+                    f"{self.DESPESAS_CLASSIFICACAO_PAGE_URL}?"
+                    f"{urlencode({'ano': config['ano'], 'data_inicial': 1, 'data_final': 12, 'tipo': 1, 'secretaria': code})}"
+                )
+                normalized = self._normalize_expense_summary(record, config["ano"], title, public_url)
+                if using_csv:
+                    result = self._save_portal_csv_row_document(
+                        db,
+                        "despesa_secretaria",
+                        title,
+                        public_url,
+                        normalized,
+                        record,
+                        params.copy(),
+                        response.url,
+                        response.status_code,
+                        endpoint,
+                    )
+                else:
+                    result = self._save_portal_document(
+                        db,
+                        "despesa_secretaria",
+                        "despesa_secretaria",
+                        title,
+                        public_url,
+                        normalized,
+                        record,
+                        params.copy(),
+                        response.url,
+                        response.status_code,
+                        endpoint,
+                    )
+                stats[result] = stats.get(result, 0) + 1
+        except Exception as error:
+            stats["erro"] += 1
+            logger.error("Erro ao coletar despesas por secretaria: %s\n%s", error, traceback.format_exc())
+        return stats
+
+    def _collect_contracts(self, db, config):
+        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        params = {
+            "tipo": "C",
+            "ano": str(config["ano"]),
+            "secretaria": "0",
+            "nome_fornecedor": "",
+            "codigo_fornecedor": "",
+            "objeto": "",
+            "contrato": "",
+            "tipo_contrato": "0",
+            "page": "0",
+            "per_page": str(config["contratos_limit"]),
+        }
+        try:
+            response = self._fetch(self.CONTRATOS_API_URL, params=params)
+            data = response.json()
+            records = data.get("contratos", []) if isinstance(data, dict) else []
+            stats["encontrado"] = len(records)
+            for record in records[:config["contratos_limit"]]:
+                number = record.get("numero_contrato") or "sem-numero"
+                year = record.get("ano_contrato") or config["ano"]
+                fornecedor = (record.get("nome_fornecedor") or "Fornecedor nao informado").strip()
+                objeto = (record.get("desc_resu_contrato") or "Objeto nao informado").strip()
+                title = f"Contrato {number}/{year} - {fornecedor} - {objeto}"[:255]
+                public_url = (
+                    f"{self.CONTRATOS_PAGE_URL}?"
+                    f"{urlencode({'tipo': 'C', 'ano': year, 'secretaria': record.get('codigo_Secretaria') or 0, 'contrato': number, 'tipo_contrato': record.get('tipo_contrato') or 0, 'empenho': record.get('numero_empenho') or ''})}"
+                )
+                normalized = self._normalize_contract(record, config["ano"], title, public_url)
+                result = self._save_portal_document(
+                    db,
+                    "contrato",
+                    "contrato",
+                    title,
+                    public_url,
+                    normalized,
+                    record,
+                    params.copy(),
+                    response.url,
+                    response.status_code,
+                    self.CONTRATOS_API_URL,
+                )
+                stats[result] = stats.get(result, 0) + 1
+        except Exception as error:
+            stats["erro"] += 1
+            logger.error("Erro ao coletar contratos: %s\n%s", error, traceback.format_exc())
+        return stats
+
+    def _collect_revenues(self, db, config):
+        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        params = {
+            "ano": str(config["ano"]),
+            "mes_inicial": "1",
+            "mes_final": "12",
+        }
+        try:
+            response = self._fetch(self.RECEITAS_CLASSIFICACAO_API_URL, params=params)
+            records = response.json()
+            if not isinstance(records, list):
+                records = []
+            stats["encontrado"] = len(records)
+            for record in records[:config["receitas_limit"]]:
+                rubric = record.get("rubrica_receita") or "sem-rubrica"
+                descricao = (record.get("descricao") or "Receita sem descricao").strip()
+                title = f"Receita {config['ano']} - {descricao}"[:255]
+                public_url = (
+                    f"{self.RECEITAS_CLASSIFICACAO_PAGE_URL}?"
+                    f"{urlencode({'ano': config['ano'], 'mes_inicial': 1, 'mes_final': 12, 'rubrica': rubric})}"
+                )
+                normalized = self._normalize_revenue(record, config["ano"], title, public_url)
+                result = self._save_portal_document(
+                    db,
+                    "receita_classificacao",
+                    "receita_classificacao",
+                    title,
+                    public_url,
+                    normalized,
+                    record,
+                    params.copy(),
+                    response.url,
+                    response.status_code,
+                    self.RECEITAS_CLASSIFICACAO_API_URL,
+                )
+                stats[result] = stats.get(result, 0) + 1
+        except Exception as error:
+            stats["erro"] += 1
+            logger.error("Erro ao coletar receitas por classificacao: %s\n%s", error, traceback.format_exc())
+        return stats
+
+    def _collect_financial_categories(self, db, config):
+        return {
+            "despesa_secretaria": self._collect_expense_summaries(db, config),
+            "contrato": self._collect_contracts(db, config),
+            "receita_classificacao": self._collect_revenues(db, config),
+        }
 
     def collect(self):
         logger.info("Iniciando coleta real do Portal da Transparência...")
@@ -337,7 +789,14 @@ class PortalTransparenciaCollector:
                     )
                     content_hash = hashlib.sha256(raw_bytes).hexdigest()
 
-                    duplicate_reason = self._duplicate_reason(db, content_hash, public_url, title, publication_date)
+                    duplicate_reason = self._duplicate_reason(
+                        db,
+                        content_hash,
+                        public_url,
+                        title,
+                        publication_date,
+                        tipo_documento="licitacao",
+                    )
                     if duplicate_reason:
                         if duplicate_reason == "hash":
                             duplicate_hash_count += 1
@@ -388,6 +847,18 @@ class PortalTransparenciaCollector:
                         record_error,
                         traceback.format_exc(),
                     )
+
+            financial_stats = self._collect_financial_categories(db, config)
+            for category, stats in financial_stats.items():
+                new_count += stats.get("salvo", 0)
+                duplicate_hash_count += stats.get("hash", 0)
+                duplicate_composite_count += stats.get("chave_composta", 0)
+                error_count += stats.get("erro", 0)
+                details.append(
+                    f"categoria={category}; registros_encontrados={stats.get('encontrado', 0)}; "
+                    f"registros_salvos={stats.get('salvo', 0)}; duplicados_por_hash={stats.get('hash', 0)}; "
+                    f"duplicados_por_chave_composta={stats.get('chave_composta', 0)}; erros={stats.get('erro', 0)}"
+                )
 
             elapsed_seconds = time.monotonic() - started_at
             details.append(
