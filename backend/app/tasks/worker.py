@@ -209,6 +209,15 @@ def process_document(doc_id):
             models.DocumentoProcessado.documento_bruto_id == doc.id
         ).first()
         if existing_proc and existing_proc.texto_limpo:
+            try:
+                from app.analytics.vector_rag import ensure_chunks_for_processed_document
+
+                chunk_count = ensure_chunks_for_processed_document(db, existing_proc)
+                db.commit()
+                logger.info("Documento %s ja processado; %s chunks disponiveis", doc_id, chunk_count)
+            except Exception as chunk_error:
+                db.rollback()
+                logger.error("Erro ao garantir chunks do documento %s: %s", doc_id, chunk_error)
             if doc.status_processamento != "processado":
                 doc.status_processamento = "processado"
                 doc.erro_processamento = None
@@ -261,11 +270,15 @@ def process_document(doc_id):
 
         try:
             from app.analytics.entity_extractor import extract_entities_for_document
+            from app.analytics.vector_rag import rebuild_chunks_for_processed_document
 
             processed = db.query(models.DocumentoProcessado).filter(
                 models.DocumentoProcessado.documento_bruto_id == doc.id
             ).first()
             if processed:
+                chunk_count = rebuild_chunks_for_processed_document(db, processed)
+                db.commit()
+                logger.info("Documento %s indexado em %s chunks", doc_id, chunk_count)
                 extract_entities_for_document(db, processed)
         except Exception as analytics_error:
             logger.error("Erro ao extrair entidades do documento %s: %s", doc_id, analytics_error)
@@ -305,6 +318,66 @@ def process_unprocessed_documents():
         process_document.delay(doc_id)
 
     return f"{len(doc_ids)} documentos enfileirados para processamento"
+
+
+@celery_app.task(name="process_document_chunks")
+def process_document_chunks(processed_doc_id):
+    from app.analytics.vector_rag import rebuild_chunks_for_processed_document
+
+    db = SessionLocal()
+    try:
+        processed = db.query(models.DocumentoProcessado).get(processed_doc_id)
+        if not processed:
+            return "Documento processado nao encontrado"
+        count = rebuild_chunks_for_processed_document(db, processed)
+        db.commit()
+        logger.info("Chunks recriados para documento processado %s: %s", processed_doc_id, count)
+        return f"{count} chunks criados para documento processado {processed_doc_id}"
+    except Exception as e:
+        logger.error("Erro em process_document_chunks %s: %s", processed_doc_id, e)
+        db.rollback()
+        return f"Erro: {str(e)}"
+    finally:
+        db.close()
+
+
+@celery_app.task(name="process_all_document_chunks")
+def process_all_document_chunks(limit=None, force=False):
+    db = SessionLocal()
+    try:
+        query = db.query(models.DocumentoProcessado).filter(
+            models.DocumentoProcessado.texto_limpo.isnot(None),
+            models.DocumentoProcessado.texto_limpo != "",
+        ).order_by(models.DocumentoProcessado.id.desc())
+        if not force:
+            query = query.outerjoin(
+                models.DocumentoChunk,
+                models.DocumentoChunk.documento_processado_id == models.DocumentoProcessado.id,
+            ).filter(models.DocumentoChunk.id.is_(None))
+        if limit:
+            query = query.limit(limit)
+
+        processed_docs = query.all()
+        total_chunks = 0
+        for processed in processed_docs:
+            from app.analytics.vector_rag import rebuild_chunks_for_processed_document
+
+            total_chunks += rebuild_chunks_for_processed_document(db, processed)
+
+        db.commit()
+        logger.info(
+            "process_all_document_chunks finalizado: %s documentos, %s chunks, force=%s",
+            len(processed_docs),
+            total_chunks,
+            force,
+        )
+        return f"{len(processed_docs)} documentos indexados em {total_chunks} chunks"
+    except Exception as e:
+        logger.error("Erro em process_all_document_chunks: %s", e)
+        db.rollback()
+        return f"Erro: {str(e)}"
+    finally:
+        db.close()
 
 
 @celery_app.task(name="process_document_entities")

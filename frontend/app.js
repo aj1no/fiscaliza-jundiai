@@ -26,10 +26,16 @@ const state = {
     filtered: [],
     pages: {},
     loading: true,
+    activeTab: 'prefeitura',
 };
 
 const financeState = {
     expenseRows: [],
+    expanded: false,
+};
+
+const camaraFinanceState = {
+    actionRows: [],
     expanded: false,
 };
 
@@ -90,6 +96,12 @@ function formatPercent(value) {
     })}%`;
 }
 
+function numberOrNull(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+}
+
 function normalizeDocuments(payload) {
     if (Array.isArray(payload)) return payload;
     if (Array.isArray(payload?.value)) return payload.value;
@@ -147,6 +159,18 @@ async function loadFinancialSummary() {
     }
 }
 
+async function loadCamaraFinancialSummary() {
+    getElement('camara-finance-year').textContent = `Ano ${FINANCIAL_YEAR}`;
+
+    try {
+        const summary = await fetchJson(`${API_URL}/analytics/camara/financeiro?ano=${FINANCIAL_YEAR}`);
+        renderCamaraFinancialSummary(summary);
+    } catch (error) {
+        console.error(error);
+        renderCamaraFinancialError();
+    }
+}
+
 function renderFinancialSummary(revenues, expenses) {
     const revenueSummary = calculateRevenueSummary(revenues?.registros || []);
     const expenseRows = Array.isArray(expenses?.secretarias) ? expenses.secretarias : [];
@@ -157,16 +181,13 @@ function renderFinancialSummary(revenues, expenses) {
     const balance = revenueSummary.collected === null || totals.paid === null
         ? null
         : revenueSummary.collected - totals.paid;
-    const paidRatio = revenueSummary.collected && totals.paid !== null
-        ? (totals.paid / revenueSummary.collected) * 100
-        : null;
+    const financialHealth = classifyFinancialHealth(revenueSummary.collected, totals.paid);
 
     getElement('finance-revenue').textContent = formatMoney(revenueSummary.collected);
     getElement('finance-paid').textContent = formatMoney(totals.paid);
     getElement('finance-balance').textContent = formatMoney(balance);
     getElement('finance-committed').textContent = formatMoney(totals.committed);
     getElement('finance-liquidated').textContent = formatMoney(totals.liquidated);
-    getElement('finance-ratio').textContent = formatPercent(paidRatio);
 
     getElement('finance-revenue-note').textContent = revenueSummary.usesTopLevel
         ? 'Rubricas de topo coletadas'
@@ -175,7 +196,40 @@ function renderFinancialSummary(revenues, expenses) {
     getElement('finance-balance-note').textContent = balance === null
         ? 'Aguardando dados oficiais'
         : 'Arrecadado menos gasto pago';
+    renderFinancialHealth(financialHealth);
     renderFinanceRanking();
+}
+
+function renderCamaraFinancialSummary(summary) {
+    const revenue = numberOrNull(summary?.receita?.total_arrecadado);
+    const paid = numberOrNull(summary?.despesa?.total_pago);
+    const liquidated = numberOrNull(summary?.despesa?.total_liquidado);
+    const committed = numberOrNull(summary?.despesa?.total_empenhado);
+    const budget = numberOrNull(summary?.despesa?.dotacao);
+    const balance = revenue === null || paid === null ? null : revenue - paid;
+    const actionRows = Array.isArray(summary?.acoes) ? summary.acoes : [];
+    const financialHealth = classifyFinancialHealth(revenue, paid, 'receita realizada coletada');
+
+    camaraFinanceState.actionRows = actionRows;
+    camaraFinanceState.expanded = false;
+
+    getElement('camara-finance-revenue').textContent = formatMoney(revenue);
+    getElement('camara-finance-paid').textContent = formatMoney(paid);
+    getElement('camara-finance-balance').textContent = formatMoney(balance);
+    getElement('camara-finance-budget').textContent = formatMoney(budget);
+    getElement('camara-finance-committed').textContent = formatMoney(committed);
+    getElement('camara-finance-liquidated').textContent = formatMoney(liquidated);
+
+    getElement('camara-finance-revenue-note').textContent = summary?.receita?.descricao || 'Receitas oficiais coletadas';
+    getElement('camara-finance-expense-note').textContent = actionRows.length === 1
+        ? '1 ação orçamentária'
+        : `${actionRows.length} ações orçamentárias`;
+    getElement('camara-finance-balance-note').textContent = balance === null
+        ? 'Aguardando dados oficiais'
+        : 'Receita realizada menos gasto pago';
+
+    renderCamaraFinancialHealth(financialHealth);
+    renderCamaraFinanceRanking();
 }
 
 function calculateRevenueSummary(rows) {
@@ -204,6 +258,85 @@ function calculateExpenseTotals(rows) {
         liquidated: sumField('total_liquidado'),
         paid: sumField('total_pago'),
     };
+}
+
+function classifyFinancialHealth(collected, paid, baseLabel = 'arrecadação coletada') {
+    if (!Number.isFinite(Number(collected)) || !Number.isFinite(Number(paid)) || Number(collected) <= 0) {
+        return {
+            level: 'unknown',
+            label: 'Sem dado',
+            note: 'Aguardando arrecadação e gastos oficiais.',
+        };
+    }
+
+    const ratio = (Number(paid) / Number(collected)) * 100;
+    const ratioText = formatPercent(ratio);
+
+    if (ratio <= 70) {
+        return {
+            level: 'perfect',
+            label: 'Perfeito',
+            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
+        };
+    }
+    if (ratio <= 85) {
+        return {
+            level: 'good',
+            label: 'Bom',
+            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
+        };
+    }
+    if (ratio <= 100) {
+        return {
+            level: 'regular',
+            label: 'Regular',
+            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
+        };
+    }
+    if (ratio <= 115) {
+        return {
+            level: 'bad',
+            label: 'Ruim',
+            note: `Gasto pago supera a ${baseLabel} em ${ratioText}.`,
+        };
+    }
+
+    return {
+        level: 'critical',
+        label: 'Péssimo',
+        note: `Gasto pago está muito acima da ${baseLabel}: ${ratioText}.`,
+    };
+}
+
+function renderHealthCard(health, ids) {
+    const card = getElement(ids.card);
+    card.classList.remove(
+        'finance-health-unknown',
+        'finance-health-perfect',
+        'finance-health-good',
+        'finance-health-regular',
+        'finance-health-bad',
+        'finance-health-critical',
+    );
+    card.classList.add(`finance-health-${health.level}`);
+    getElement(ids.status).textContent = health.label;
+    getElement(ids.note).textContent = health.note;
+}
+
+function renderFinancialHealth(health) {
+    renderHealthCard(health, {
+        card: 'finance-health-card',
+        status: 'finance-health-status',
+        note: 'finance-health-note',
+    });
+}
+
+function renderCamaraFinancialHealth(health) {
+    renderHealthCard(health, {
+        card: 'camara-finance-health-card',
+        status: 'camara-finance-health-status',
+        note: 'camara-finance-health-note',
+    });
 }
 
 function renderFinanceRanking() {
@@ -241,12 +374,13 @@ function renderFinanceRanking() {
 function renderFinanceRankingItem(row, index) {
     const href = row.url_origem || '#';
     const hasLink = Boolean(row.url_origem);
+    const title = row.secretaria || row.descricao || 'Item não informado';
 
     return `
         <article class="ranking-item">
             <span class="ranking-position">${index + 1}</span>
             <div class="ranking-content">
-                <strong>${escapeHtml(row.secretaria || 'Secretaria não informada')}</strong>
+                <strong>${escapeHtml(title)}</strong>
                 <div class="ranking-values">
                     <span>
                         <small>Pago</small>
@@ -267,14 +401,69 @@ function renderFinanceRankingItem(row, index) {
     `;
 }
 
+function renderCamaraFinanceRanking() {
+    const ranked = [...camaraFinanceState.actionRows]
+        .filter((row) => Number.isFinite(Number(row.total_pago)) || Number.isFinite(Number(row.total_empenhado)))
+        .sort((a, b) => (Number(b.total_pago) || Number(b.total_empenhado) || 0) - (Number(a.total_pago) || Number(a.total_empenhado) || 0));
+
+    const container = getElement('camara-finance-ranking-list');
+    if (!ranked.length) {
+        container.innerHTML = '<p>Nenhuma ação com valor estruturado ainda.</p>';
+        return;
+    }
+
+    const visibleRows = camaraFinanceState.expanded ? ranked : ranked.slice(0, 5);
+    const toggleButton = ranked.length > 5
+        ? `
+            <button class="ranking-toggle" data-action="toggle-camara-expenses" type="button">
+                ${camaraFinanceState.expanded ? 'Mostrar top 5' : `Ver todas as ${ranked.length} ações`}
+            </button>
+        `
+        : '';
+    const summary = camaraFinanceState.expanded
+        ? `Listando todas as ${ranked.length} ações com valores estruturados`
+        : `Mostrando as 5 maiores de ${ranked.length} ações`;
+
+    container.innerHTML = `
+        <div class="ranking-summary">
+            <span>${escapeHtml(summary)}</span>
+            ${toggleButton}
+        </div>
+        ${visibleRows.map((row, index) => renderFinanceRankingItem(row, index)).join('')}
+    `;
+}
+
 function renderFinancialError() {
     getElement('finance-revenue').textContent = 'Sem dado';
     getElement('finance-paid').textContent = 'Sem dado';
     getElement('finance-balance').textContent = 'Sem dado';
+    renderFinancialHealth({
+        level: 'unknown',
+        label: 'Sem dado',
+        note: 'Não foi possível carregar o alerta financeiro.',
+    });
     getElement('finance-revenue-note').textContent = 'Não foi possível carregar';
     getElement('finance-expense-note').textContent = 'Não foi possível carregar';
     getElement('finance-balance-note').textContent = 'Verifique a API';
     getElement('finance-ranking-list').innerHTML = '<p>Não foi possível carregar os gastos por secretaria.</p>';
+}
+
+function renderCamaraFinancialError() {
+    getElement('camara-finance-revenue').textContent = 'Sem dado';
+    getElement('camara-finance-paid').textContent = 'Sem dado';
+    getElement('camara-finance-balance').textContent = 'Sem dado';
+    getElement('camara-finance-budget').textContent = 'Sem dado';
+    getElement('camara-finance-committed').textContent = 'Sem dado';
+    getElement('camara-finance-liquidated').textContent = 'Sem dado';
+    renderCamaraFinancialHealth({
+        level: 'unknown',
+        label: 'Sem dado',
+        note: 'Não foi possível carregar o alerta financeiro da Câmara.',
+    });
+    getElement('camara-finance-revenue-note').textContent = 'Não foi possível carregar';
+    getElement('camara-finance-expense-note').textContent = 'Não foi possível carregar';
+    getElement('camara-finance-balance-note').textContent = 'Verifique a API';
+    getElement('camara-finance-ranking-list').innerHTML = '<p>Não foi possível carregar os gastos da Câmara.</p>';
 }
 
 async function loadDocuments() {
@@ -493,32 +682,30 @@ function renderDocumentCard(doc) {
     `;
 }
 
-async function triggerCollect() {
-    const button = getElement('btn-collect');
-    const originalText = button.textContent;
-    button.disabled = true;
-    button.textContent = 'Enviando...';
+function switchTab(tabId) {
+    const panel = document.querySelector(`[data-tab-panel="${tabId}"]`);
+    if (!panel) return;
 
-    try {
-        const response = await fetch(`${API_URL}/collect/manual`, { method: 'POST' });
-        if (!response.ok) throw new Error(`Status ${response.status}`);
-        button.textContent = 'Coleta enviada';
-        setTimeout(() => {
-            loadFinancialSummary();
-            loadDocuments();
-        }, 3000);
-    } catch (error) {
-        console.error(error);
-        button.textContent = 'Falha ao enviar';
-    } finally {
-        setTimeout(() => {
-            button.disabled = false;
-            button.textContent = originalText;
-        }, 1800);
-    }
+    state.activeTab = tabId;
+
+    document.querySelectorAll('.tab-button').forEach((button) => {
+        const isActive = button.dataset.tab === tabId;
+        button.classList.toggle('active', isActive);
+        button.setAttribute('aria-selected', String(isActive));
+    });
+
+    document.querySelectorAll('.tab-panel').forEach((item) => {
+        item.classList.toggle('active', item.dataset.tabPanel === tabId);
+    });
 }
 
 function bindEvents() {
+    getElement('tabs-nav').addEventListener('click', (event) => {
+        const button = event.target.closest('.tab-button');
+        if (!button) return;
+
+        switchTab(button.dataset.tab);
+    });
     getElement('main-search').addEventListener('input', applyFilters);
     getElement('filter-source').addEventListener('change', applyFilters);
     getElement('filter-type').addEventListener('change', applyFilters);
@@ -528,13 +715,19 @@ function bindEvents() {
         getElement('filter-type').value = '';
         applyFilters();
     });
-    getElement('btn-collect').addEventListener('click', triggerCollect);
     getElement('finance-ranking-list').addEventListener('click', (event) => {
         const button = event.target.closest('[data-action="toggle-expenses"]');
         if (!button) return;
 
         financeState.expanded = !financeState.expanded;
         renderFinanceRanking();
+    });
+    getElement('camara-finance-ranking-list').addEventListener('click', (event) => {
+        const button = event.target.closest('[data-action="toggle-camara-expenses"]');
+        if (!button) return;
+
+        camaraFinanceState.expanded = !camaraFinanceState.expanded;
+        renderCamaraFinanceRanking();
     });
     getElement('source-sections').addEventListener('click', (event) => {
         const button = event.target.closest('.pagination-btn');
@@ -558,8 +751,10 @@ function bindEvents() {
 
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
+    switchTab(state.activeTab);
     checkHealth();
     loadFinancialSummary();
+    loadCamaraFinancialSummary();
     loadDocuments();
     setInterval(checkHealth, 30000);
 });

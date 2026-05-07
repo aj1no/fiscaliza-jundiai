@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fiscaliza Jundiaí | Painel público</title>
     <meta name="description" content="Painel público para acompanhar documentos oficiais de Jundiaí/SP.">
-    <link rel="stylesheet" href="index.css?v=20260506-3">
+    <link rel="stylesheet" href="index.css?v=20260507-1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -21,7 +21,6 @@
                 <span class="status-dot"></span>
                 <span>API <strong id="status-text">conectando...</strong></span>
             </div>
-            <button id="btn-collect" class="btn-primary">Executar coleta</button>
         </div>
     </header>
 
@@ -45,7 +44,19 @@
             </article>
         </section>
 
-        <section class="finance-panel" aria-labelledby="finance-title">
+        <nav class="tabs-nav" id="tabs-nav" aria-label="Seções do painel">
+            <button class="tab-button active" type="button" data-tab="prefeitura" aria-selected="true" aria-controls="tab-prefeitura">
+                Prefeitura
+            </button>
+            <button class="tab-button" type="button" data-tab="camara" aria-selected="false" aria-controls="tab-camara">
+                Câmara Municipal
+            </button>
+            <button class="tab-button" type="button" data-tab="documentos" aria-selected="false" aria-controls="tab-documentos">
+                Documentos oficiais
+            </button>
+        </nav>
+
+        <section class="finance-panel tab-panel active" id="tab-prefeitura" data-tab-panel="prefeitura" aria-labelledby="finance-title">
             <div class="finance-header">
                 <div>
                     <p class="eyebrow">Portal da Transparência</p>
@@ -82,9 +93,12 @@
                         <span>Liquidado</span>
                         <strong id="finance-liquidated">--</strong>
                     </div>
-                    <div>
-                        <span>Pago sobre arrecadado</span>
-                        <strong id="finance-ratio">--</strong>
+                    <div class="finance-health finance-health-kpi finance-health-unknown" id="finance-health-card">
+                        <span>
+                            Saúde financeira
+                            <small id="finance-health-note">Indicador simplificado</small>
+                        </span>
+                        <strong id="finance-health-status" class="finance-health-status">Avaliando...</strong>
                     </div>
                 </div>
                 <div class="finance-ranking">
@@ -98,6 +112,67 @@
             </div>
         </section>
 
+        <section class="finance-panel finance-panel-camara tab-panel" id="tab-camara" data-tab-panel="camara" aria-labelledby="camara-finance-title">
+            <div class="finance-header">
+                <div>
+                    <p class="eyebrow">Transparência da Câmara</p>
+                    <h2 id="camara-finance-title">Receitas e gastos da Câmara Municipal</h2>
+                </div>
+                <span class="finance-year camara-year" id="camara-finance-year">Ano atual</span>
+            </div>
+
+            <div class="finance-grid">
+                <article class="finance-card finance-revenue">
+                    <span class="finance-label">Receita realizada</span>
+                    <strong id="camara-finance-revenue">Carregando...</strong>
+                    <small id="camara-finance-revenue-note">Receitas coletadas</small>
+                </article>
+                <article class="finance-card finance-expense">
+                    <span class="finance-label">Gasto pago</span>
+                    <strong id="camara-finance-paid">Carregando...</strong>
+                    <small id="camara-finance-expense-note">Despesas por ação</small>
+                </article>
+                <article class="finance-card finance-balance">
+                    <span class="finance-label">Saldo simples</span>
+                    <strong id="camara-finance-balance">Carregando...</strong>
+                    <small id="camara-finance-balance-note">Receita menos gasto pago</small>
+                </article>
+            </div>
+
+            <div class="finance-details">
+                <div class="finance-kpis">
+                    <div>
+                        <span>Dotação atual</span>
+                        <strong id="camara-finance-budget">--</strong>
+                    </div>
+                    <div>
+                        <span>Empenhado</span>
+                        <strong id="camara-finance-committed">--</strong>
+                    </div>
+                    <div>
+                        <span>Liquidado</span>
+                        <strong id="camara-finance-liquidated">--</strong>
+                    </div>
+                    <div class="finance-health finance-health-kpi finance-health-unknown" id="camara-finance-health-card">
+                        <span>
+                            Saúde financeira
+                            <small id="camara-finance-health-note">Indicador simplificado</small>
+                        </span>
+                        <strong id="camara-finance-health-status" class="finance-health-status">Avaliando...</strong>
+                    </div>
+                </div>
+                <div class="finance-ranking">
+                    <div class="ranking-title">
+                        <span>Maiores gastos pagos por ação orçamentária</span>
+                    </div>
+                    <div id="camara-finance-ranking-list" class="ranking-list">
+                        <p>Carregando ações...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="tab-panel documents-tab" id="tab-documentos" data-tab-panel="documentos">
         <section class="filters-bar" aria-label="Filtros de documentos">
             <label class="field field-search">
                 <span>Busca</span>
@@ -132,12 +207,13 @@
         <div id="source-sections" class="source-sections">
             <div class="loading">Carregando documentos...</div>
         </div>
+        </div>
     </main>
 
     <footer class="footer">
         <p>Dados extraídos de fontes oficiais. A fonte primária continua sendo o órgão público responsável.</p>
     </footer>
 
-    <script src="app.js?v=20260506-3"></script>
+    <script src="app.js?v=20260507-1"></script>
 </body>
 </html>

@@ -1,9 +1,23 @@
 from collections import Counter
+from datetime import datetime
+import logging
 
+import requests
 from sqlalchemy import func, or_
 
 from app.analytics.entity_extractor import normalize_text
 from app.models import models
+
+logger = logging.getLogger(__name__)
+
+CAMARA_TRANSPARENCIA_BASE_URL = "https://web.cijun.sp.gov.br/camara/yc/v1"
+CAMARA_TRANSPARENCIA_SITE_URL = "https://transparencia.jundiai.sp.leg.br/"
+CAMARA_DESPESAS_URL = (
+    "https://transparencia.jundiai.sp.leg.br/despesas/por-classificacao-orcamentaria/"
+)
+CAMARA_RECEITAS_URL = (
+    "https://transparencia.jundiai.sp.leg.br/receita/por-classificacao-orcamentaria/"
+)
 
 
 def _document_payload(doc):
@@ -21,6 +35,61 @@ def _document_payload(doc):
 def _meaningful_parts(value):
     ignored = {"de", "da", "do", "das", "dos", "e", "mun", "secr"}
     return [part for part in normalize_text(value).split() if len(part) > 3 and part not in ignored]
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _camara_get_json(path, params):
+    url = f"{CAMARA_TRANSPARENCIA_BASE_URL}/{path.lstrip('/')}"
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": "FiscalizaJundiai/1.0 (+https://transparencia.jundiai.sp.leg.br/)",
+    }
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+    except requests.exceptions.SSLError:
+        logger.warning("Falha SSL no endpoint da Camara; repetindo com verificacao desativada: %s", url)
+        response = requests.get(url, params=params, headers=headers, timeout=30, verify=False)
+
+    response.raise_for_status()
+    return {
+        "url": response.url,
+        "status_code": response.status_code,
+        "params": params,
+        "data": response.json(),
+    }
+
+
+def _camara_extract_rows(payload):
+    data = payload.get("data")
+    if isinstance(data, dict) and isinstance(data.get("retorno"), list):
+        return data["retorno"]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def _camara_row_payload(row, url_origem):
+    return {
+        "descricao": row.get("descricao"),
+        "flag": row.get("flag"),
+        "valor_inicial": _to_float(row.get("valor_inicial")),
+        "creditos": _to_float(row.get("creditos")),
+        "dotacao": _to_float(row.get("dotacao")),
+        "total_empenhado": _to_float(row.get("empenhado")),
+        "total_liquidado": _to_float(row.get("liquidado")),
+        "total_pago": _to_float(row.get("pago")),
+        "data_inicio": row.get("data_inicio"),
+        "data_fim": row.get("data_fim"),
+        "url_origem": url_origem,
+    }
 
 
 def vereador_analytics(db, nome):
@@ -326,6 +395,168 @@ def receitas_analytics(db, ano=None, termo=None, limit=100):
     }
 
 
+def camara_financeiro(ano=None):
+    ano = ano or datetime.now().year
+    erros = []
+
+    despesa_total_payload = None
+    despesa_acoes_payload = None
+    receita_payload = None
+
+    despesa_total_params = {
+        "ano": ano,
+        "data_inicial": 1,
+        "data_final": 12,
+        "tipo": 1,
+        "page": 1,
+    }
+    despesa_acoes_params = {
+        "ano": ano,
+        "data_inicial": 1,
+        "data_final": 12,
+        "tipo": 5,
+        "page": 1,
+        "per_page": 1000000,
+    }
+    receita_params = {
+        "ano": ano,
+        "mes_inicial": 1,
+        "mes_final": 12,
+    }
+
+    try:
+        despesa_total_payload = _camara_get_json(
+            "Despesas/GetDespesasPorClassificacao",
+            despesa_total_params,
+        )
+    except Exception as exc:
+        logger.exception("Falha ao buscar despesas totais da Camara")
+        erros.append({
+            "categoria": "despesa_total",
+            "url": f"{CAMARA_TRANSPARENCIA_BASE_URL}/Despesas/GetDespesasPorClassificacao",
+            "params": despesa_total_params,
+            "erro": str(exc),
+        })
+
+    try:
+        despesa_acoes_payload = _camara_get_json(
+            "Despesas/GetDespesasPorClassificacao",
+            despesa_acoes_params,
+        )
+    except Exception as exc:
+        logger.exception("Falha ao buscar despesas por acao da Camara")
+        erros.append({
+            "categoria": "despesa_acoes",
+            "url": f"{CAMARA_TRANSPARENCIA_BASE_URL}/Despesas/GetDespesasPorClassificacao",
+            "params": despesa_acoes_params,
+            "erro": str(exc),
+        })
+
+    try:
+        receita_payload = _camara_get_json(
+            "Receitas/GetReceitasPorClassificacao",
+            receita_params,
+        )
+    except Exception as exc:
+        logger.exception("Falha ao buscar receitas da Camara")
+        erros.append({
+            "categoria": "receita",
+            "url": f"{CAMARA_TRANSPARENCIA_BASE_URL}/Receitas/GetReceitasPorClassificacao",
+            "params": receita_params,
+            "erro": str(exc),
+        })
+
+    despesa_total_rows = _camara_extract_rows(despesa_total_payload or {})
+    despesa_acoes_rows = _camara_extract_rows(despesa_acoes_payload or {})
+    receita_rows = _camara_extract_rows(receita_payload or {})
+
+    despesa_total = _camara_row_payload(despesa_total_rows[0], CAMARA_DESPESAS_URL) if despesa_total_rows else None
+    acoes = [
+        _camara_row_payload(row, CAMARA_DESPESAS_URL)
+        for row in despesa_acoes_rows
+        if any(_to_float(row.get(field)) for field in ("empenhado", "liquidado", "pago"))
+    ]
+    acoes.sort(key=lambda row: row.get("total_pago") or row.get("total_empenhado") or 0, reverse=True)
+
+    receita_total_row = next(
+        (
+            row for row in receita_rows
+            if "total geral" in normalize_text(row.get("descricao"))
+        ),
+        None,
+    )
+    receita_uso = receita_total_row
+    if not receita_uso and receita_rows:
+        receita_uso = {
+            "descricao": "Soma de receitas retornadas",
+            "arrecadado": sum(_to_float(row.get("arrecadado")) or 0 for row in receita_rows),
+            "orcado": sum(_to_float(row.get("orcado")) or 0 for row in receita_rows),
+            "percentual": None,
+        }
+
+    return {
+        "ano": ano,
+        "fonte": "camara_municipal",
+        "orgao": "Camara Municipal de Jundiai",
+        "url_origem": CAMARA_TRANSPARENCIA_SITE_URL,
+        "despesa": {
+            **(despesa_total or {
+                "descricao": None,
+                "flag": None,
+                "valor_inicial": None,
+                "creditos": None,
+                "dotacao": None,
+                "total_empenhado": None,
+                "total_liquidado": None,
+                "total_pago": None,
+                "data_inicio": None,
+                "data_fim": None,
+                "url_origem": CAMARA_DESPESAS_URL,
+            }),
+            "endpoint": despesa_total_payload.get("url") if despesa_total_payload else None,
+            "status_code": despesa_total_payload.get("status_code") if despesa_total_payload else None,
+            "params": despesa_total_params,
+        },
+        "receita": {
+            "descricao": receita_uso.get("descricao") if receita_uso else None,
+            "situacao": receita_uso.get("situacao") if receita_uso else None,
+            "total_orcado": _to_float(receita_uso.get("orcado")) if receita_uso else None,
+            "total_arrecadado": _to_float(receita_uso.get("arrecadado")) if receita_uso else None,
+            "percentual": _to_float(receita_uso.get("percentual")) if receita_uso else None,
+            "url_origem": CAMARA_RECEITAS_URL,
+            "endpoint": receita_payload.get("url") if receita_payload else None,
+            "status_code": receita_payload.get("status_code") if receita_payload else None,
+            "params": receita_params,
+        },
+        "acoes": acoes,
+        "rastreabilidade": {
+            "despesa_total": {
+                "endpoint": despesa_total_payload.get("url") if despesa_total_payload else None,
+                "status_code": despesa_total_payload.get("status_code") if despesa_total_payload else None,
+                "params": despesa_total_params,
+                "registros": len(despesa_total_rows),
+            },
+            "despesa_acoes": {
+                "endpoint": despesa_acoes_payload.get("url") if despesa_acoes_payload else None,
+                "status_code": despesa_acoes_payload.get("status_code") if despesa_acoes_payload else None,
+                "params": despesa_acoes_params,
+                "registros": len(despesa_acoes_rows),
+            },
+            "receita": {
+                "endpoint": receita_payload.get("url") if receita_payload else None,
+                "status_code": receita_payload.get("status_code") if receita_payload else None,
+                "params": receita_params,
+                "registros": len(receita_rows),
+            },
+        },
+        "erros": erros,
+        "observacao": (
+            "Resumo calculado a partir dos endpoints publicos de receitas e despesas por classificacao "
+            "orcamentaria da Camara Municipal. As acoes usam tipo=5 para evitar dupla contagem hierarquica."
+        ),
+    }
+
+
 def temas_frequentes(db, limit=20):
     rows = db.query(
         models.EntidadeExtraida.valor,
@@ -367,6 +598,54 @@ def secretarias_frequentes(db, tipo_documento=None, limit=20):
     return [{"secretaria": value, "total": total} for value, total in rows]
 
 
+def _format_brl(value):
+    if value is None:
+        return None
+    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _chunk_payload(scored_chunk):
+    chunk = scored_chunk["chunk"]
+    payload = scored_chunk.get("payload") or {}
+    if not chunk:
+        return {
+            "score": scored_chunk["score"],
+            "chunk_id": payload.get("chunk_id"),
+            "chunk_index": payload.get("chunk_index"),
+            "trecho": (payload.get("texto") or "")[:900],
+            "documento": {
+                "id": payload.get("documento_bruto_id"),
+                "fonte": payload.get("fonte"),
+                "tipo_documento": payload.get("tipo_documento"),
+                "titulo": payload.get("titulo"),
+                "data_publicacao": payload.get("data_publicacao"),
+                "url_origem": payload.get("url_origem"),
+                "status_processamento": None,
+            },
+            "embedding_model": payload.get("embedding_model"),
+            "vector_store": scored_chunk.get("vector_store"),
+            "baseado_em_vetor_local": True,
+        }
+
+    doc = chunk.documento_bruto
+    return {
+        "score": scored_chunk["score"],
+        "chunk_id": chunk.id,
+        "chunk_index": chunk.chunk_index,
+        "trecho": chunk.texto_limpo[:900],
+        "documento": _document_payload(doc) if doc else None,
+        "embedding_model": chunk.embedding_model,
+        "vector_store": scored_chunk.get("vector_store"),
+        "baseado_em_vetor_local": True,
+    }
+
+
+def retrieve_chunks(db, q, limit=8):
+    from app.analytics.vector_rag import search_chunks
+
+    return [_chunk_payload(item) for item in search_chunks(db, q, limit=limit)]
+
+
 def retrieve_documents(db, q, limit=8):
     normalized = normalize_text(q)
     ignored = {"que", "qual", "quanto", "com", "para", "por", "uma", "uns", "das", "dos", "jundiai", "2026"}
@@ -401,18 +680,49 @@ def retrieve_documents(db, q, limit=8):
 
 
 def rag_answer(db, q):
-    evidencias = retrieve_documents(db, q)
+    evidencias = retrieve_chunks(db, q)
+    fallback_textual = False
+    if not evidencias:
+        evidencias = retrieve_documents(db, q)
+        fallback_textual = True
+
+    structured = None
+    normalized = normalize_text(q)
+    if "quanto" in normalized or "gastou" in normalized or "gasto" in normalized or "gastos" in normalized:
+        structured = gastos_por_termo(db, q, _extract_year(normalized))
+
+    totals = ""
+    if structured:
+        total_pago = _format_brl(structured.get("total_pago"))
+        total_liquidado = _format_brl(structured.get("total_liquidado"))
+        total_empenhado = _format_brl(structured.get("total_empenhado"))
+        total_parts = []
+        if total_pago:
+            total_parts.append(f"pago identificado: {total_pago}")
+        if total_liquidado:
+            total_parts.append(f"liquidado: {total_liquidado}")
+        if total_empenhado:
+            total_parts.append(f"empenhado: {total_empenhado}")
+        if total_parts:
+            totals = " Totais estruturados encontrados: " + "; ".join(total_parts) + "."
+
     return {
-        "tipo": "rag_local",
+        "tipo": "rag_vetorial_local" if not fallback_textual else "rag_textual_fallback",
         "consulta": q,
         "resposta": (
-            "Encontrei documentos oficiais relacionados. Esta resposta usa recuperacao textual local; "
-            "confira as fontes antes de concluir valores ou responsabilidades."
+            "Encontrei trechos oficiais relacionados por busca vetorial local."
+            + totals
+            + " Confira as fontes antes de concluir valores ou responsabilidades."
             if evidencias else
             "Nao encontrei documentos oficiais coletados que sustentem uma resposta para essa pergunta."
         ),
         "evidencias": evidencias,
+        "analise_estruturada": structured,
         "baseado_em_aproximacao_textual": True,
+        "observacao": (
+            "Esta RAG usa chunks com overlap e embeddings locais por hash. Ela ja prepara a arquitetura "
+            "para pgvector/OpenAI/Gemini, mas ainda nao usa um modelo semantico externo."
+        ),
     }
 
 

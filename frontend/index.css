@@ -232,6 +232,56 @@ h4 {
     letter-spacing: -0.04em;
 }
 
+.tabs-nav {
+    display: flex;
+    gap: 8px;
+    padding: 8px;
+    margin: 0 0 16px;
+    background: rgba(17, 28, 41, 0.8);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.24);
+    backdrop-filter: blur(16px);
+}
+
+.tab-button {
+    flex: 1;
+    min-height: 46px;
+    padding: 0 14px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-weight: 900;
+    cursor: pointer;
+}
+
+.tab-button:hover,
+.tab-button:focus-visible {
+    color: var(--text);
+    border-color: rgba(124, 194, 255, 0.26);
+    outline: none;
+}
+
+.tab-button.active {
+    color: #06111e;
+    background: var(--primary-strong);
+    border-color: var(--primary-strong);
+    box-shadow: 0 10px 22px rgba(77, 163, 255, 0.2);
+}
+
+.tab-panel {
+    display: none;
+}
+
+.tab-panel.active {
+    display: block;
+}
+
+.documents-tab {
+    margin-bottom: 18px;
+}
+
 .finance-panel {
     padding: 18px;
     margin: 0 0 18px;
@@ -239,6 +289,11 @@ h4 {
     border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: var(--shadow);
+}
+
+.finance-panel-camara {
+    background: linear-gradient(180deg, rgba(14, 31, 42, 0.94), rgba(9, 17, 28, 0.94));
+    border-color: rgba(124, 194, 255, 0.2);
 }
 
 .finance-header {
@@ -259,6 +314,10 @@ h4 {
     border-radius: 8px;
     font-weight: 900;
     white-space: nowrap;
+}
+
+.camara-year {
+    background: var(--primary-strong);
 }
 
 .finance-grid {
@@ -283,6 +342,49 @@ h4 {
 .finance-expense {
     border-color: rgba(255, 196, 93, 0.28);
     background: linear-gradient(180deg, rgba(255, 196, 93, 0.12), rgba(22, 36, 53, 0.88));
+}
+
+.finance-health {
+    border-color: rgba(124, 194, 255, 0.24);
+    background: linear-gradient(180deg, rgba(124, 194, 255, 0.1), rgba(22, 36, 53, 0.88));
+}
+
+.finance-health-perfect {
+    border-color: rgba(68, 215, 168, 0.42);
+    background: linear-gradient(180deg, rgba(68, 215, 168, 0.18), rgba(22, 36, 53, 0.9));
+}
+
+.finance-health-good {
+    border-color: rgba(124, 194, 255, 0.42);
+    background: linear-gradient(180deg, rgba(77, 163, 255, 0.16), rgba(22, 36, 53, 0.9));
+}
+
+.finance-health-regular {
+    border-color: rgba(255, 196, 93, 0.42);
+    background: linear-gradient(180deg, rgba(255, 196, 93, 0.15), rgba(22, 36, 53, 0.9));
+}
+
+.finance-health-bad,
+.finance-health-critical {
+    border-color: rgba(255, 119, 112, 0.44);
+    background: linear-gradient(180deg, rgba(255, 119, 112, 0.16), rgba(22, 36, 53, 0.9));
+}
+
+.finance-health-perfect .finance-health-status {
+    color: var(--green);
+}
+
+.finance-health-good .finance-health-status {
+    color: var(--primary-strong);
+}
+
+.finance-health-regular .finance-health-status {
+    color: var(--amber);
+}
+
+.finance-health-bad .finance-health-status,
+.finance-health-critical .finance-health-status {
+    color: var(--danger);
 }
 
 .finance-balance {
@@ -345,6 +447,23 @@ h4 {
 .finance-kpis strong {
     color: var(--text);
     text-align: right;
+}
+
+.finance-health-kpi {
+    align-items: start;
+}
+
+.finance-health-kpi span {
+    display: grid;
+    gap: 4px;
+}
+
+.finance-health-kpi small {
+    color: var(--muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: none;
 }
 
 .ranking-title {
@@ -770,6 +889,17 @@ h4 {
         flex-direction: column;
     }
 
+    .tabs-nav {
+        overflow-x: auto;
+        scroll-snap-type: x mandatory;
+    }
+
+    .tab-button {
+        flex: 0 0 auto;
+        min-width: 158px;
+        scroll-snap-align: start;
+    }
+
     .topbar-actions,
     .results-header,
     .source-header,
@@ -779,6 +909,7 @@ h4 {
     }
 
     .summary-strip,
+    .finance-grid,
     .filters-bar,
     .document-card,
     .pagination-row {

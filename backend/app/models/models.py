@@ -41,6 +41,25 @@ class DocumentoProcessado(Base):
     
     documento_bruto = relationship("DocumentoBruto")
 
+
+class DocumentoChunk(Base):
+    __tablename__ = "documento_chunks"
+    id = Column(Integer, primary_key=True, index=True)
+    documento_processado_id = Column(Integer, ForeignKey("documentos_processados.id"), index=True, nullable=False)
+    documento_bruto_id = Column(Integer, ForeignKey("documentos_brutos.id"), index=True, nullable=False)
+    chunk_index = Column(Integer, nullable=False)
+    texto = Column(Text, nullable=False)
+    texto_limpo = Column(Text, nullable=False)
+    embedding = Column(Text)
+    embedding_model = Column(String(80), default="local-hash-v1")
+    hash_chunk = Column(String(64), index=True)
+    tamanho = Column(Integer)
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    documento_processado = relationship("DocumentoProcessado")
+    documento_bruto = relationship("DocumentoBruto")
+
+
 class LogColeta(Base):
     __tablename__ = "logs_coleta"
     id = Column(Integer, primary_key=True, index=True)

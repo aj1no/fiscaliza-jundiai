@@ -162,6 +162,11 @@ def analytics_receitas(
     return analytics_service.receitas_analytics(db, ano=ano, termo=termo, limit=limit)
 
 
+@app.get("/analytics/camara/financeiro")
+def analytics_camara_financeiro(ano: Optional[int] = None):
+    return analytics_service.camara_financeiro(ano)
+
+
 @app.get("/analytics/temas")
 def analytics_temas(limit: int = 20, db: Session = Depends(get_db)):
     return analytics_service.temas_frequentes(db, limit=limit)
@@ -190,3 +195,30 @@ def ask(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
 @app.get("/rag")
 def rag(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
     return analytics_service.rag_answer(db, q)
+
+
+@app.get("/rag/search")
+def rag_search(
+    q: str = Query(..., min_length=1),
+    limit: int = 8,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.retrieve_chunks(db, q, limit=limit)
+
+
+@app.post("/rag/index")
+def trigger_rag_index(limit: Optional[int] = None, force: bool = False):
+    task = worker.process_all_document_chunks.delay(limit, force)
+    return {"message": "Indexacao RAG iniciada", "task_id": task.id}
+
+
+@app.get("/rag/status")
+def rag_status(db: Session = Depends(get_db)):
+    from app.analytics.vector_rag import qdrant_status
+
+    return {
+        "documentos_processados": db.query(models.DocumentoProcessado).count(),
+        "chunks": db.query(models.DocumentoChunk).count(),
+        "embedding_model": "local-hash-v1",
+        "qdrant": qdrant_status(),
+    }
