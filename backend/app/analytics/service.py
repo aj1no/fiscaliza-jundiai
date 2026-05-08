@@ -6,6 +6,7 @@ import requests
 from sqlalchemy import func, or_
 
 from app.analytics.entity_extractor import normalize_text
+from app.analytics import llm_service
 from app.models import models
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,41 @@ def _document_payload(doc):
 def _meaningful_parts(value):
     ignored = {"de", "da", "do", "das", "dos", "e", "mun", "secr"}
     return [part for part in normalize_text(value).split() if len(part) > 3 and part not in ignored]
+
+
+COMMON_QUERY_ALIASES = {
+    "emeb": ["emeb", "emebs"],
+    "emebs": ["emeb", "emebs"],
+    "asfalto": ["asfalto", "pavimentacao", "pavimento", "recapeamento", "recape"],
+    "asfaltamento": ["asfalto", "pavimentacao", "pavimento", "recapeamento", "recape"],
+    "rua": ["rua", "via", "vias", "pavimentacao", "recapeamento"],
+    "ruas": ["rua", "via", "vias", "pavimentacao", "recapeamento"],
+    "creche": ["creche", "educacao infantil"],
+    "creches": ["creche", "educacao infantil"],
+}
+
+
+def _query_term_groups(text, ignored):
+    terms = [
+        part for part in normalize_text(text).split()
+        if len(part) > 2 and part not in ignored and not part.isdigit()
+    ]
+    groups = []
+    for term in terms:
+        aliases = COMMON_QUERY_ALIASES.get(term, [term])
+        if term.endswith("s") and len(term) > 4:
+            aliases = [*aliases, term[:-1]]
+        normalized_aliases = [normalize_text(alias) for alias in aliases if normalize_text(alias)]
+        groups.append(sorted(set(normalized_aliases)))
+    return groups
+
+
+def _matches_term_group(haystack, group):
+    return any(alias in haystack for alias in group)
+
+
+def _flatten_term_groups(groups):
+    return sorted({alias for group in groups for alias in group})
 
 
 def _to_float(value):
@@ -259,9 +295,12 @@ def gastos_por_termo(db, termo, ano=None):
     normalized = normalize_text(termo)
     ignored = {
         "quanto", "gastou", "gasto", "gastos", "com", "sobre", "para", "pela",
-        "pelo", "foi", "foram", "em", "de", "da", "do", "das", "dos", "jundiai",
+        "pelas", "pelo", "pelos", "foi", "foram", "em", "de", "da", "do",
+        "das", "dos", "na", "nas", "no", "nos", "ao", "aos", "jundiai",
+        "municipio", "prefeitura",
     }
-    terms = [part for part in normalized.split() if len(part) > 2 and part not in ignored and not part.isdigit()]
+    term_groups = _query_term_groups(normalized, ignored)
+    all_terms = _flatten_term_groups(term_groups)
 
     query = db.query(models.Despesa).join(
         models.DocumentoBruto,
@@ -283,14 +322,17 @@ def gastos_por_termo(db, termo, ano=None):
             item.url_origem,
             item.fonte_documento.titulo if item.fonte_documento else None,
         ])))
-        if terms and all(term in haystack for term in terms):
+        if term_groups and all(_matches_term_group(haystack, group) for group in term_groups):
             matches.append(item)
 
-    if not matches and terms:
+    if not matches and all_terms:
         matches = [
             item for item in candidates
             if item.fonte_documento and item.fonte_documento.tipo_documento != "despesa_secretaria"
-            and any(term in normalize_text(" ".join(filter(None, [item.objeto, item.fornecedor, item.secretaria]))) for term in terms)
+            and any(
+                term in normalize_text(" ".join(filter(None, [item.objeto, item.fornecedor, item.secretaria])))
+                for term in all_terms
+            )
         ][:30]
 
     def total(field):
@@ -301,6 +343,7 @@ def gastos_por_termo(db, termo, ano=None):
     return {
         "termo": termo,
         "ano": ano,
+        "termos_busca": all_terms,
         "total_empenhado": total("valor_empenhado"),
         "total_liquidado": total("valor_liquidado"),
         "total_pago": total("valor_pago"),
@@ -392,6 +435,200 @@ def receitas_analytics(db, ano=None, termo=None, limit=100):
             for row in rows
         ],
         "observacao": "Arrecadacao baseada no endpoint publico de receita por classificacao orcamentaria.",
+    }
+
+
+def servidores_remuneracao(db, ano=None, mes=None, secretaria=None, limit=50):
+    limit = min(max(int(limit or 50), 1), 200)
+    query = db.query(models.ServidorRemuneracao)
+    if ano:
+        query = query.filter(models.ServidorRemuneracao.ano == ano)
+    if mes:
+        query = query.filter(models.ServidorRemuneracao.mes == mes)
+    if secretaria:
+        normalized_secretaria = normalize_text(secretaria)
+        candidates = query.limit(20000).all()
+        rows = [
+            row for row in candidates
+            if normalized_secretaria in normalize_text(row.secretaria)
+            or any(part in normalize_text(row.secretaria) for part in _meaningful_parts(normalized_secretaria))
+        ]
+    else:
+        rows = query.limit(20000).all()
+
+    def total(field):
+        values = [getattr(row, field) for row in rows if getattr(row, field) is not None]
+        return sum(values) if values else None
+
+    by_secretaria = {}
+    for row in rows:
+        key = row.secretaria or "Secretaria nao informada"
+        bucket = by_secretaria.setdefault(key, {
+            "secretaria": key,
+            "servidores": 0,
+            "total_remuneracao_mes": 0.0,
+            "total_remuneracao_bruta": 0.0,
+            "total_salario_base": 0.0,
+        })
+        bucket["servidores"] += 1
+        bucket["total_remuneracao_mes"] += row.valor_total_mes or 0
+        bucket["total_remuneracao_bruta"] += row.valor_total_venc or 0
+        bucket["total_salario_base"] += row.valor_salario_base or 0
+
+    secretarias = sorted(
+        by_secretaria.values(),
+        key=lambda item: item["total_remuneracao_mes"],
+        reverse=True,
+    )
+    registros = sorted(rows, key=lambda row: row.valor_total_mes or 0, reverse=True)[:limit]
+    documentos = []
+    seen_docs = set()
+    for row in rows:
+        if row.fonte_documento and row.fonte_documento.id not in seen_docs:
+            documentos.append(_document_payload(row.fonte_documento))
+            seen_docs.add(row.fonte_documento.id)
+
+    return {
+        "ano": ano,
+        "mes": mes,
+        "secretaria": secretaria,
+        "servidores": len(rows),
+        "total_remuneracao_bruta": total("valor_total_venc"),
+        "total_remuneracao_mes": total("valor_total_mes"),
+        "total_salario_base": total("valor_salario_base"),
+        "secretarias": secretarias,
+        "documentos": documentos,
+        "registros": [
+            {
+                "id": row.id,
+                "ano": row.ano,
+                "mes": row.mes,
+                "codigo_funcionario": row.codigo_funcionario,
+                "nome_funcionario": row.nome_funcionario,
+                "secretaria": row.secretaria,
+                "cargo": row.cargo,
+                "provimento": row.provimento,
+                "carga_horaria": row.carga_horaria,
+                "valor_total_venc": row.valor_total_venc,
+                "valor_total_mes": row.valor_total_mes,
+                "valor_salario_base": row.valor_salario_base,
+                "data_atualizacao": row.data_atualizacao,
+                "url_origem": row.url_origem,
+            }
+            for row in registros
+        ],
+        "observacao": (
+            "Valores estruturados a partir do CSV publico de remuneracao mensal. "
+            "Codigos mascarados pelo portal permanecem mascarados; totais refletem os CSVs coletados no banco."
+        ),
+    }
+
+
+def auditoria_remuneracao_mensal(db, ano, ate_mes=12):
+    ate_mes = max(1, min(int(ate_mes or 12), 12))
+
+    rows = db.query(
+        models.ServidorRemuneracao.mes.label("mes"),
+        func.count(models.ServidorRemuneracao.id).label("registros"),
+        func.count(func.distinct(models.ServidorRemuneracao.fonte_documento_id)).label("documentos_fonte"),
+        func.sum(models.ServidorRemuneracao.valor_total_venc).label("total_bruto"),
+        func.sum(models.ServidorRemuneracao.valor_total_mes).label("total_liquido"),
+        func.sum(models.ServidorRemuneracao.valor_salario_base).label("total_base"),
+    ).filter(
+        models.ServidorRemuneracao.ano == ano,
+        models.ServidorRemuneracao.mes.isnot(None),
+        models.ServidorRemuneracao.mes >= 1,
+        models.ServidorRemuneracao.mes <= ate_mes,
+    ).group_by(
+        models.ServidorRemuneracao.mes
+    ).order_by(
+        models.ServidorRemuneracao.mes.asc()
+    ).all()
+
+    by_month = {int(row.mes): row for row in rows}
+    timeline = []
+    inconsistencias = []
+    meses_faltantes = []
+    acumulado_bruto = 0.0
+    acumulado_liquido = 0.0
+    acumulado_base = 0.0
+
+    for month in range(1, ate_mes + 1):
+        row = by_month.get(month)
+        if not row:
+            meses_faltantes.append(month)
+            timeline.append({
+                "mes": month,
+                "status": "nao_coletado",
+                "registros": 0,
+                "documentos_fonte": 0,
+                "total_bruto": None,
+                "total_liquido": None,
+                "total_base": None,
+                "acumulado_bruto": acumulado_bruto if acumulado_bruto > 0 else None,
+                "acumulado_liquido": acumulado_liquido if acumulado_liquido > 0 else None,
+                "acumulado_base": acumulado_base if acumulado_base > 0 else None,
+                "variacao_liquido_mes_anterior": None,
+            })
+            continue
+
+        total_bruto = float(row.total_bruto or 0)
+        total_liquido = float(row.total_liquido or 0)
+        total_base = float(row.total_base or 0)
+        prev = timeline[-1] if timeline else None
+        variacao = None
+        if prev and prev.get("total_liquido") not in (None, 0):
+            variacao = ((total_liquido - float(prev["total_liquido"])) / float(prev["total_liquido"])) * 100.0
+
+        acumulado_bruto += total_bruto
+        acumulado_liquido += total_liquido
+        acumulado_base += total_base
+
+        month_inconsistencias = []
+        if int(row.documentos_fonte or 0) != 1:
+            month_inconsistencias.append("quantidade_documentos_fonte_inesperada")
+        if int(row.registros or 0) <= 0:
+            month_inconsistencias.append("sem_registros")
+        if total_liquido <= 0:
+            month_inconsistencias.append("total_liquido_nao_positivo")
+        if total_bruto < total_liquido:
+            month_inconsistencias.append("total_bruto_menor_que_liquido")
+
+        if month_inconsistencias:
+            inconsistencias.append({
+                "mes": month,
+                "regras": month_inconsistencias,
+            })
+
+        timeline.append({
+            "mes": month,
+            "status": "coletado",
+            "registros": int(row.registros or 0),
+            "documentos_fonte": int(row.documentos_fonte or 0),
+            "total_bruto": total_bruto,
+            "total_liquido": total_liquido,
+            "total_base": total_base,
+            "acumulado_bruto": acumulado_bruto,
+            "acumulado_liquido": acumulado_liquido,
+            "acumulado_base": acumulado_base,
+            "variacao_liquido_mes_anterior": variacao,
+        })
+
+    return {
+        "ano": ano,
+        "ate_mes": ate_mes,
+        "meses_coletados": len(rows),
+        "meses_faltantes": meses_faltantes,
+        "inconsistencias": inconsistencias,
+        "linha_mensal": timeline,
+        "total_bruto_periodo": acumulado_bruto if acumulado_bruto > 0 else None,
+        "total_liquido_periodo": acumulado_liquido if acumulado_liquido > 0 else None,
+        "total_base_periodo": acumulado_base if acumulado_base > 0 else None,
+        "aprovado_sem_alertas": len(inconsistencias) == 0,
+        "observacao": (
+            "Auditoria baseada em dados reais coletados no banco. "
+            "Meses sem coleta entram como nao_coletado e devem ser preenchidos para auditoria anual completa."
+        ),
     }
 
 
@@ -693,35 +930,32 @@ def rag_answer(db, q):
 
     totals = ""
     if structured:
-        total_pago = _format_brl(structured.get("total_pago"))
-        total_liquidado = _format_brl(structured.get("total_liquidado"))
-        total_empenhado = _format_brl(structured.get("total_empenhado"))
         total_parts = []
-        if total_pago:
-            total_parts.append(f"pago identificado: {total_pago}")
-        if total_liquidado:
-            total_parts.append(f"liquidado: {total_liquidado}")
-        if total_empenhado:
-            total_parts.append(f"empenhado: {total_empenhado}")
+        if structured.get("total_pago") and structured["total_pago"] > 0:
+            total_parts.append(f"pago identificado: {_format_brl(structured['total_pago'])}")
+        if structured.get("total_liquidado") and structured["total_liquidado"] > 0:
+            total_parts.append(f"liquidado: {_format_brl(structured['total_liquidado'])}")
+        if structured.get("total_empenhado") and structured["total_empenhado"] > 0:
+            total_parts.append(f"empenhado: {_format_brl(structured['total_empenhado'])}")
         if total_parts:
             totals = " Totais estruturados encontrados: " + "; ".join(total_parts) + "."
+
+    # Gerar a resposta final usando a LLM (Gemini) se disponível
+    if evidencias or structured:
+        resposta_final = llm_service.generate_answer(q, evidencias, structured)
+    else:
+        resposta_final = "Nao encontrei documentos oficiais coletados que sustentem uma resposta para essa pergunta."
 
     return {
         "tipo": "rag_vetorial_local" if not fallback_textual else "rag_textual_fallback",
         "consulta": q,
-        "resposta": (
-            "Encontrei trechos oficiais relacionados por busca vetorial local."
-            + totals
-            + " Confira as fontes antes de concluir valores ou responsabilidades."
-            if evidencias else
-            "Nao encontrei documentos oficiais coletados que sustentem uma resposta para essa pergunta."
-        ),
+        "resposta": resposta_final,
         "evidencias": evidencias,
         "analise_estruturada": structured,
         "baseado_em_aproximacao_textual": True,
         "observacao": (
-            "Esta RAG usa chunks com overlap e embeddings locais por hash. Ela ja prepara a arquitetura "
-            "para pgvector/OpenAI/Gemini, mas ainda nao usa um modelo semantico externo."
+            "Esta resposta foi gerada por uma IA (Gemini 1.5 Flash) com base nos documentos oficiais recuperados. "
+            "Sempre confira os trechos originais abaixo para máxima precisão."
         ),
     }
 
@@ -731,11 +965,17 @@ def interpret_question(db, q):
 
     if "fez" in normalized or "vereador" in normalized or "vereadora" in normalized:
         for vereador in db.query(models.Vereador).all():
-            if vereador.nome_normalizado in normalized or any(part in normalized for part in _meaningful_parts(vereador.nome_normalizado)):
+            if (
+                vereador.nome_normalizado in normalized 
+                or any(part in normalized for part in _meaningful_parts(vereador.nome_normalizado))
+            ):
+                analytics = vereador_analytics(db, vereador.nome)
+                # Usar a LLM para resumir a atuação do vereador
+                resumo_ia = llm_service.generate_answer(q, [], analytics)
                 return {
                     "tipo": "analytics_vereador",
                     "consulta": q,
-                    "resposta": vereador_analytics(db, vereador.nome),
+                    "resposta": {**analytics, "resumo_ia": resumo_ia},
                     "baseado_em_aproximacao_textual": True,
                 }
 
@@ -756,6 +996,24 @@ def interpret_question(db, q):
             "baseado_em_aproximacao_textual": False,
         }
 
+    if any(term in normalized for term in ["servidor", "servidores", "remuneracao", "salario", "salarios", "folha", "funcionalismo"]):
+        secretaria_nome = None
+        for secretaria in db.query(models.Secretaria).all():
+            if secretaria.nome_normalizado in normalized or any(part in normalized for part in _meaningful_parts(secretaria.nome_normalizado)):
+                secretaria_nome = secretaria.nome
+                break
+        return {
+            "tipo": "analytics_servidores_remuneracao",
+            "consulta": q,
+            "resposta": servidores_remuneracao(
+                db,
+                ano=_extract_year(normalized),
+                mes=_extract_month(normalized),
+                secretaria=secretaria_nome,
+            ),
+            "baseado_em_aproximacao_textual": False,
+        }
+
     if "quanto" in normalized or "gastou" in normalized or "gasto" in normalized:
         if any(term in normalized for term in ["cada secretaria", "por secretaria", "secretarias"]):
             return {
@@ -767,11 +1025,12 @@ def interpret_question(db, q):
         for secretaria in db.query(models.Secretaria).all():
             if secretaria.nome_normalizado in normalized or any(part in normalized for part in _meaningful_parts(secretaria.nome_normalizado)):
                 ano = _extract_year(normalized)
+                resposta = gastos_secretaria(db, secretaria.nome, ano)
                 return {
                     "tipo": "analytics_gastos_secretaria",
                     "consulta": q,
-                    "resposta": gastos_secretaria(db, secretaria.nome, ano),
-                    "baseado_em_aproximacao_textual": True,
+                    "resposta": resposta,
+                    "baseado_em_aproximacao_textual": resposta.get("baseado_em_aproximacao_textual", True),
                 }
         return {
             "tipo": "analytics_gastos_termo",
@@ -832,6 +1091,27 @@ def _extract_year(text):
 
     match = re.search(r"\b(20\d{2})\b", text)
     return int(match.group(1)) if match else None
+
+
+def _extract_month(text):
+    months = {
+        "janeiro": 1,
+        "fevereiro": 2,
+        "marco": 3,
+        "abril": 4,
+        "maio": 5,
+        "junho": 6,
+        "julho": 7,
+        "agosto": 8,
+        "setembro": 9,
+        "outubro": 10,
+        "novembro": 11,
+        "dezembro": 12,
+    }
+    for name, number in months.items():
+        if name in text:
+            return number
+    return None
 
 
 def _extract_subject_term(text, ignored):

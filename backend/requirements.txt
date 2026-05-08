@@ -19,3 +19,4 @@ celery
 redis
 flower
 python-magic
+google-generativeai

@@ -128,11 +128,35 @@ No payload bruto usado para hash, `data_coleta` fica `null` de proposito para ma
 | Variavel | Padrao | Teto interno | Uso |
 | --- | --- | --- | --- |
 | `PORTAL_TRANSPARENCIA_ANO` | ano atual | 2100 | Exercicio consultado |
+| `PORTAL_TRANSPARENCIA_ANO_INICIAL` | `PORTAL_TRANSPARENCIA_ANO` | 2100 | Inicio da janela de anos |
+| `PORTAL_TRANSPARENCIA_ANO_FINAL` | `PORTAL_TRANSPARENCIA_ANO` | 2100 | Fim da janela de anos |
+| `PORTAL_TRANSPARENCIA_MAX_ANOS_COLETA` | 10 | 15 | Teto de seguranca para backfill |
 | `PORTAL_TRANSPARENCIA_LIMIT` | 100 | 1000 | Licitacoes |
 | `PORTAL_TRANSPARENCIA_PAGE_SIZE` | 100 | 100 | Tamanho fixo da pagina |
 | `PORTAL_TRANSPARENCIA_DESPESAS_SECRETARIA_LIMIT` | 150 | 500 | Despesas por secretaria |
 | `PORTAL_TRANSPARENCIA_CONTRATOS_LIMIT` | 150 | 500 | Contratos |
 | `PORTAL_TRANSPARENCIA_RECEITAS_LIMIT` | 150 | 500 | Receitas |
+| `PORTAL_TRANSPARENCIA_MES` | mes de referencia | 12 | Mes unico para remuneracao (modo fixo) |
+| `PORTAL_TRANSPARENCIA_MES_INICIAL` | `PORTAL_TRANSPARENCIA_MES` | 12 | Inicio do intervalo de meses |
+| `PORTAL_TRANSPARENCIA_MES_FINAL` | `PORTAL_TRANSPARENCIA_MES` | 12 | Fim do intervalo de meses |
+| `PORTAL_TRANSPARENCIA_REMUNERACAO_LIMIT` | 10000 | 20000 | Limite CSV remuneracao por consulta |
+
+### Recorte temporal recomendado
+
+Para fiscalizacao da gestao iniciada em 01/01/2025:
+
+```env
+PORTAL_TRANSPARENCIA_ANO_INICIAL=2025
+PORTAL_TRANSPARENCIA_ANO_FINAL=2026
+PORTAL_TRANSPARENCIA_MAX_ANOS_COLETA=10
+```
+
+Comportamento da remuneracao sem override de mes:
+
+- ano passado: coleta `1..12`;
+- ano atual: coleta `1..mes de referencia` (mes atual - 1).
+
+Se quiser forcar um intervalo fixo para todos os anos, defina `PORTAL_TRANSPARENCIA_MES_INICIAL` e `PORTAL_TRANSPARENCIA_MES_FINAL`.
 
 ## Execucao manual
 

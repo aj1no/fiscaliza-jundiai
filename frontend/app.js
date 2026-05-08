@@ -32,11 +32,18 @@ const state = {
 const financeState = {
     expenseRows: [],
     expanded: false,
+    charts: {
+        expenses: null,
+        comparison: null,
+    },
 };
 
 const camaraFinanceState = {
     actionRows: [],
     expanded: false,
+    charts: {
+        expenses: null,
+    },
 };
 
 function getElement(id) {
@@ -116,25 +123,6 @@ async function fetchJson(url) {
     return response.json();
 }
 
-async function checkHealth() {
-    const statusText = getElement('status-text');
-    const indicator = getElement('api-status-indicator');
-
-    try {
-        const response = await fetch(`${API_URL}/health`);
-        const data = await response.json();
-        const online = response.ok && data.status === 'ok';
-
-        statusText.textContent = online ? 'online' : 'com erro';
-        indicator.classList.toggle('online', online);
-        indicator.classList.toggle('offline', !online);
-    } catch (error) {
-        statusText.textContent = 'offline';
-        indicator.classList.remove('online');
-        indicator.classList.add('offline');
-    }
-}
-
 async function fetchDocumentsBySource(sourceId) {
     const url = `${API_URL}/documents?fonte=${encodeURIComponent(sourceId)}&limit=${DOCUMENT_LIMIT}`;
     const response = await fetch(url);
@@ -171,6 +159,22 @@ async function loadCamaraFinancialSummary() {
     }
 }
 
+function renderFinancialHealth(health) {
+    renderHealthCard(health, {
+        card: 'finance-health-card',
+        status: 'finance-health-status',
+        note: 'finance-health-note',
+    });
+}
+
+function renderCamaraFinancialHealth(health) {
+    renderHealthCard(health, {
+        card: 'camara-finance-health-card',
+        status: 'camara-finance-health-status',
+        note: 'camara-finance-health-note',
+    });
+}
+
 function renderFinancialSummary(revenues, expenses) {
     const revenueSummary = calculateRevenueSummary(revenues?.registros || []);
     const expenseRows = Array.isArray(expenses?.secretarias) ? expenses.secretarias : [];
@@ -196,7 +200,9 @@ function renderFinancialSummary(revenues, expenses) {
     getElement('finance-balance-note').textContent = balance === null
         ? 'Aguardando dados oficiais'
         : 'Arrecadado menos gasto pago';
+    
     renderFinancialHealth(financialHealth);
+    renderChartsPrefeitura(revenueSummary, totals, expenseRows);
     renderFinanceRanking();
 }
 
@@ -229,6 +235,7 @@ function renderCamaraFinancialSummary(summary) {
         : 'Receita realizada menos gasto pago';
 
     renderCamaraFinancialHealth(financialHealth);
+    renderChartsCamara(actionRows, summary);
     renderCamaraFinanceRanking();
 }
 
@@ -323,19 +330,116 @@ function renderHealthCard(health, ids) {
     getElement(ids.note).textContent = health.note;
 }
 
-function renderFinancialHealth(health) {
-    renderHealthCard(health, {
-        card: 'finance-health-card',
-        status: 'finance-health-status',
-        note: 'finance-health-note',
-    });
+function renderChartsPrefeitura(revenueSummary, expenseTotals, expenseRows) {
+    // 1. Chart Expenses by Secretariat (Doughnut)
+    const ctxExp = getElement('chart-prefeitura-expenses')?.getContext('2d');
+    if (ctxExp) {
+        if (financeState.charts.expenses) financeState.charts.expenses.destroy();
+
+        const topSecretariats = [...expenseRows]
+            .sort((a, b) => (b.total_pago || 0) - (a.total_pago || 0))
+            .slice(0, 8);
+
+        financeState.charts.expenses = new Chart(ctxExp, {
+            type: 'doughnut',
+            data: {
+                labels: topSecretariats.map((s) => s.secretaria),
+                datasets: [{
+                    data: topSecretariats.map((s) => s.total_pago),
+                    backgroundColor: [
+                        '#4da3ff', '#44d7a8', '#ffc45d', '#ff7770',
+                        '#b2cae4', '#7cc2ff', '#1b2c3f', '#9fb0c2',
+                    ],
+                    borderWidth: 0,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'right',
+                        labels: { color: '#9fb0c2', font: { size: 10 } },
+                    },
+                },
+            },
+        });
+    }
+
+    // 2. Chart Revenue vs Expense (Bar)
+    const ctxComp = getElement('chart-prefeitura-comparison')?.getContext('2d');
+    if (ctxComp) {
+        if (financeState.charts.comparison) financeState.charts.comparison.destroy();
+
+        financeState.charts.comparison = new Chart(ctxComp, {
+            type: 'bar',
+            data: {
+                labels: ['Arrecadação', 'Gasto Pago'],
+                datasets: [{
+                    label: 'Valores em R$',
+                    data: [revenueSummary.collected || 0, expenseTotals.paid || 0],
+                    backgroundColor: ['#44d7a8', '#ff7770'],
+                    borderRadius: 6,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { color: '#9fb0c2', font: { size: 10 } },
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                    },
+                    x: {
+                        ticks: { color: '#9fb0c2' },
+                        grid: { display: false },
+                    },
+                },
+            },
+        });
+    }
 }
 
-function renderCamaraFinancialHealth(health) {
-    renderHealthCard(health, {
-        card: 'camara-finance-health-card',
-        status: 'camara-finance-health-status',
-        note: 'camara-finance-health-note',
+function renderChartsCamara(actionRows, summary) {
+    const ctxExp = getElement('chart-camara-expenses')?.getContext('2d');
+    if (!ctxExp) return;
+
+    if (camaraFinanceState.charts.expenses) camaraFinanceState.charts.expenses.destroy();
+
+    const topActions = [...actionRows]
+        .sort((a, b) => (b.total_pago || 0) - (a.total_pago || 0))
+        .slice(0, 8);
+
+    camaraFinanceState.charts.expenses = new Chart(ctxExp, {
+        type: 'bar',
+        data: {
+            labels: topActions.map((a) => a.descricao.slice(0, 20) + '...'),
+            datasets: [{
+                label: 'Gasto Pago',
+                data: topActions.map((a) => a.total_pago),
+                backgroundColor: '#7cc2ff',
+                borderRadius: 6,
+            }],
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    ticks: { color: '#9fb0c2', font: { size: 10 } },
+                    grid: { color: 'rgba(255,255,255,0.05)' },
+                },
+                y: {
+                    ticks: { color: '#9fb0c2', font: { size: 10 } },
+                    grid: { display: false },
+                },
+            },
+        },
     });
 }
 
@@ -682,6 +786,344 @@ function renderDocumentCard(doc) {
     `;
 }
 
+function clearAsk() {
+    const input = getElement('ask-input');
+    const result = getElement('ask-result');
+    input.value = '';
+    result.hidden = true;
+    result.innerHTML = '';
+    input.focus();
+}
+
+async function runAsk(question) {
+    const trimmed = question.trim();
+    if (!trimmed) return;
+
+    const input = getElement('ask-input');
+    const button = document.querySelector('.ask-submit');
+    const result = getElement('ask-result');
+    input.value = trimmed;
+    button.disabled = true;
+    button.textContent = 'Pesquisando...';
+    result.hidden = false;
+    result.innerHTML = `
+        <div class="ask-loading">
+            <strong>Buscando nos documentos oficiais...</strong>
+            <span>${escapeHtml(trimmed)}</span>
+        </div>
+    `;
+
+    try {
+        const payload = await fetchJson(`${API_URL}/ask?q=${encodeURIComponent(trimmed)}`);
+        renderAskResult(payload);
+    } catch (error) {
+        console.error(error);
+        result.innerHTML = `
+            <div class="message error">
+                Não foi possível consultar os dados agora. Tente novamente em instantes.
+            </div>
+        `;
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Pesquisar';
+    }
+}
+
+function renderAskResult(payload) {
+    const result = getElement('ask-result');
+    const answer = payload?.resposta ?? payload;
+    const approximate = Boolean(payload?.baseado_em_aproximacao_textual || answer?.baseado_em_aproximacao_textual);
+
+    if (isSpendingAnswer(answer)) {
+        result.innerHTML = renderSpendingAnswer(payload, answer, approximate);
+        return;
+    }
+
+    if (payload?.tipo === 'analytics_vereador') {
+        result.innerHTML = renderVereadorAnswer(payload, answer, approximate);
+        return;
+    }
+
+    if (answer?.resposta || Array.isArray(answer?.evidencias)) {
+        result.innerHTML = renderRagAnswer(payload, answer, approximate);
+        return;
+    }
+
+    if (Array.isArray(answer)) {
+        result.innerHTML = renderSimpleListAnswer(payload, answer, approximate);
+        return;
+    }
+
+    result.innerHTML = `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>${escapeHtml(formatAskType(payload?.tipo))}</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <p>Encontrei dados relacionados, mas eles ainda não têm um resumo próprio para este tipo de pergunta.</p>
+        </div>
+    `;
+}
+
+function isSpendingAnswer(answer) {
+    return Boolean(answer && typeof answer === 'object' && (
+        'total_pago' in answer
+        || 'total_liquidado' in answer
+        || 'total_empenhado' in answer
+        || Array.isArray(answer.registros)
+    ));
+}
+
+function renderSpendingAnswer(payload, answer, approximate) {
+    const positiveTotals = [
+        ['Pago identificado', answer.total_pago],
+        ['Liquidado identificado', answer.total_liquidado],
+        ['Empenhado identificado', answer.total_empenhado],
+    ].filter(([, value]) => Number.isFinite(Number(value)) && Number(value) > 0);
+
+    const records = uniqueByUrl(answer.registros || []).slice(0, 5);
+    const documents = uniqueDocuments(answer.documentos || []).slice(0, 5);
+    const summary = positiveTotals.length
+        ? 'Encontrei valores estruturados relacionados à pergunta.'
+        : records.length || documents.length
+            ? 'Encontrei registros oficiais relacionados, mas sem valor pago ou liquidado estruturado para somar com segurança.'
+            : 'Não encontrei registros estruturados nos dados coletados para esta pergunta.';
+
+    return `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>${escapeHtml(formatAskType(payload?.tipo))}</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <h3>${escapeHtml(summary)}</h3>
+            ${positiveTotals.length ? `
+                <div class="ask-total-grid">
+                    ${positiveTotals.map(([label, value]) => `
+                        <div>
+                            <span>${escapeHtml(label)}</span>
+                            <strong>${escapeHtml(formatMoney(value))}</strong>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : `
+                <p class="ask-note">
+                    Isso não significa que o gasto foi zero. Significa que, nas fontes coletadas até agora,
+                    não apareceu um valor consolidado confiável para essa pergunta.
+                </p>
+            `}
+            ${records.length ? `
+                <div class="ask-section">
+                    <span class="ask-section-title">Registros relacionados</span>
+                    <div class="ask-record-list">
+                        ${records.map(renderAskRecord).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            ${documents.length ? renderAskDocuments(documents) : ''}
+            ${answer.observacao ? `<p class="ask-observation">${escapeHtml(answer.observacao)}</p>` : ''}
+        </div>
+    `;
+}
+
+function renderAskRecord(record) {
+    const title = record.objeto || record.fornecedor || record.secretaria || 'Registro relacionado';
+    const hasLink = Boolean(record.url_origem);
+    return `
+        <article class="ask-record">
+            <strong>${escapeHtml(title)}</strong>
+            <div class="ask-record-meta">
+                <span>${escapeHtml(record.secretaria || 'Secretaria não informada')}</span>
+                <span>${escapeHtml(record.fornecedor || 'Fornecedor não informado')}</span>
+                <span>${escapeHtml(record.ano || 'Ano não informado')}</span>
+            </div>
+            <div class="ask-money-row">
+                <span>Pago: <b>${escapeHtml(formatMoney(record.valor_pago))}</b></span>
+                <span>Liquidado: <b>${escapeHtml(formatMoney(record.valor_liquidado))}</b></span>
+                <span>Empenhado: <b>${escapeHtml(formatMoney(record.valor_empenhado))}</b></span>
+            </div>
+            <a class="${hasLink ? '' : 'disabled'}" href="${escapeHtml(record.url_origem || '#')}" target="_blank" rel="noopener noreferrer">
+                Ver origem
+            </a>
+        </article>
+    `;
+}
+
+function renderRagAnswer(payload, answer, approximate) {
+    const evidences = Array.isArray(answer.evidencias) ? answer.evidencias.slice(0, 5) : [];
+    return `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>${escapeHtml(formatAskType(payload?.tipo || answer?.tipo))}</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <h3>${escapeHtml(answer.resposta || 'Encontrei documentos relacionados.')}</h3>
+            ${evidences.length ? `
+                <div class="ask-section">
+                    <span class="ask-section-title">Trechos encontrados</span>
+                    <div class="ask-record-list">
+                        ${evidences.map(renderAskEvidence).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            ${answer.observacao ? `<p class="ask-observation">${escapeHtml(answer.observacao)}</p>` : ''}
+        </div>
+    `;
+}
+
+function renderAskEvidence(item) {
+    const doc = item.documento || {};
+    const hasLink = Boolean(doc.url_origem);
+    return `
+        <article class="ask-record">
+            <strong>${escapeHtml(doc.titulo || 'Documento relacionado')}</strong>
+            <p>${escapeHtml(item.trecho || '').slice(0, 360)}</p>
+            <div class="ask-record-meta">
+                <span>${escapeHtml(sourceLabel(doc.fonte))}</span>
+                <span>${escapeHtml(formatType(doc.tipo_documento))}</span>
+            </div>
+            <a class="${hasLink ? '' : 'disabled'}" href="${escapeHtml(doc.url_origem || '#')}" target="_blank" rel="noopener noreferrer">
+                Ver origem
+            </a>
+        </article>
+    `;
+}
+
+function renderSimpleListAnswer(payload, rows, approximate) {
+    return `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>${escapeHtml(formatAskType(payload?.tipo))}</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <h3>Encontrei ${rows.length} resultado${rows.length === 1 ? '' : 's'} relacionado${rows.length === 1 ? '' : 's'}.</h3>
+            <div class="ask-chip-list">
+                ${rows.slice(0, 12).map((row) => `
+                    <span>${escapeHtml(Object.values(row).filter(Boolean).join(' - '))}</span>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderVereadorAnswer(payload, answer, approximate) {
+    const vereador = answer.vereador || {};
+    const atuacoes = (answer.atuacoes || []).slice(0, 10);
+    const temas = (answer.temas || []).slice(0, 5);
+    const documentos = (answer.documentos || []).slice(0, 5);
+
+    return `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>Atuação Parlamentar</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <div class="ask-profile-header">
+                <div class="ask-profile-info">
+                    <h3>${escapeHtml(vereador.nome || 'Vereador')}</h3>
+                    <p>${escapeHtml(vereador.partido || 'Partido não informado')}</p>
+                </div>
+            </div>
+
+            ${answer.resumo_ia ? `
+                <div class="ask-ia-summary">
+                    <p>${escapeHtml(answer.resumo_ia)}</p>
+                </div>
+            ` : ''}
+
+            ${temas.length ? `
+                <div class="ask-section">
+                    <span class="ask-section-title">Temas mais trabalhados</span>
+                    <div class="ask-chip-list">
+                        ${temas.map((t) => `<span>${escapeHtml(t.tema)} (${t.total})</span>`).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            ${atuacoes.length ? `
+                <div class="ask-section">
+                    <span class="ask-section-title">Projetos e Atuações</span>
+                    <div class="ask-record-list">
+                        ${atuacoes.map(renderAtuacaoCard).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            ${documentos.length ? renderAskDocuments(documentos) : ''}
+            ${answer.observacao ? `<p class="ask-observation">${escapeHtml(answer.observacao)}</p>` : ''}
+        </div>
+    `;
+}
+
+function renderAtuacaoCard(atuacao) {
+    const hasLink = Boolean(atuacao.url_origem);
+    return `
+        <article class="ask-record">
+            <div class="ask-record-header">
+                <span class="badge">${escapeHtml(atuacao.tipo_atuacao || 'Atuação')}</span>
+                ${atuacao.data_atuacao ? `<span>${new Date(atuacao.data_atuacao).toLocaleDateString('pt-BR')}</span>` : ''}
+            </div>
+            <strong>${escapeHtml(atuacao.titulo || 'Atuação parlamentar')}</strong>
+            <p>${escapeHtml(atuacao.descricao || '').slice(0, 200)}${atuacao.descricao?.length > 200 ? '...' : ''}</p>
+            <div class="ask-record-meta">
+                <span>Tema: ${escapeHtml(atuacao.tema || 'Geral')}</span>
+                ${atuacao.bairro ? `<span>Bairro: ${escapeHtml(atuacao.bairro)}</span>` : ''}
+            </div>
+            <a class="${hasLink ? '' : 'disabled'}" href="${escapeHtml(atuacao.url_origem || '#')}" target="_blank" rel="noopener noreferrer">
+                Ver documento completo
+            </a>
+        </article>
+    `;
+}
+
+function renderAskDocuments(documents) {
+    return `
+        <div class="ask-section">
+            <span class="ask-section-title">Fontes oficiais</span>
+            <div class="ask-source-list">
+                ${documents.map((doc) => `
+                    <a href="${escapeHtml(doc.url_origem || '#')}" target="_blank" rel="noopener noreferrer" class="${doc.url_origem ? '' : 'disabled'}">
+                        <strong>${escapeHtml(doc.titulo || 'Documento oficial')}</strong>
+                        <span>${escapeHtml(sourceLabel(doc.fonte))} · ${escapeHtml(formatType(doc.tipo_documento))}</span>
+                    </a>
+                `).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function uniqueByUrl(rows) {
+    const seen = new Set();
+    return rows.filter((row) => {
+        const key = row.url_origem || `${row.objeto}|${row.fornecedor}|${row.secretaria}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function uniqueDocuments(documents) {
+    const seen = new Set();
+    return documents.filter((doc) => {
+        const key = doc.url_origem || doc.id || doc.titulo;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function formatAskType(type) {
+    const labels = {
+        analytics_gastos_termo: 'Gastos por assunto',
+        analytics_gastos_secretaria: 'Gastos por secretaria',
+        analytics_gastos_secretarias: 'Gastos por secretarias',
+        analytics_receitas: 'Arrecadação',
+        analytics_vereador: 'Atuação Parlamentar',
+        rag_vetorial_local: 'Busca nos documentos',
+        rag_textual_fallback: 'Busca textual',
+    };
+    return labels[type] || 'Resultado';
+}
+
 function switchTab(tabId) {
     const panel = document.querySelector(`[data-tab-panel="${tabId}"]`);
     if (!panel) return;
@@ -700,6 +1142,11 @@ function switchTab(tabId) {
 }
 
 function bindEvents() {
+    getElement('ask-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        runAsk(getElement('ask-input').value);
+    });
+    getElement('ask-clear').addEventListener('click', clearAsk);
     getElement('tabs-nav').addEventListener('click', (event) => {
         const button = event.target.closest('.tab-button');
         if (!button) return;
@@ -752,9 +1199,7 @@ function bindEvents() {
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
     switchTab(state.activeTab);
-    checkHealth();
     loadFinancialSummary();
     loadCamaraFinancialSummary();
     loadDocuments();
-    setInterval(checkHealth, 30000);
 });

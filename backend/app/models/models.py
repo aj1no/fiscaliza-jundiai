@@ -168,3 +168,26 @@ class Receita(Base):
     criado_em = Column(DateTime, default=datetime.utcnow)
 
     fonte_documento = relationship("DocumentoBruto")
+
+
+class ServidorRemuneracao(Base):
+    __tablename__ = "servidores_remuneracao"
+    id = Column(Integer, primary_key=True, index=True)
+    fonte_documento_id = Column(Integer, ForeignKey("documentos_brutos.id"), index=True)
+    ano = Column(Integer, index=True)
+    mes = Column(Integer, index=True)
+    codigo_funcionario = Column(String(50), index=True)
+    nome_funcionario = Column(String(255), index=True)
+    secretaria = Column(String(255), index=True)
+    cargo = Column(String(255), index=True)
+    provimento = Column(String(120))
+    carga_horaria = Column(String(40))
+    data_admissao = Column(DateTime)
+    valor_total_venc = Column(Float)
+    valor_total_mes = Column(Float)
+    valor_salario_base = Column(Float)
+    data_atualizacao = Column(DateTime)
+    url_origem = Column(String(500))
+    criado_em = Column(DateTime, default=datetime.utcnow)
+
+    fonte_documento = relationship("DocumentoBruto")

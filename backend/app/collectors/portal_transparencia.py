@@ -29,6 +29,7 @@ class PortalTransparenciaCollector:
     CONTRATOS_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorContrato"
     RECEITAS_CLASSIFICACAO_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Receitas/ClassificacaoOrcamentaria"
     RECEITAS_CLASSIFICACAO_API_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Receitas/GetReceitasPorClassificacao"
+    REMUNERACAO_PAGE_URL = "https://web21.cijun.sp.gov.br/PMJ/YC/Funcionalismo/Remuneracao"
     STORAGE_PATH = "storage/raw/portal_transparencia"
     DEFAULT_LIMIT = 100
     DEFAULT_PAGE_SIZE = 100
@@ -36,6 +37,10 @@ class PortalTransparenciaCollector:
     MAX_LIMIT = 1000
     DEFAULT_FINANCIAL_LIMIT = 150
     MAX_FINANCIAL_LIMIT = 500
+    DEFAULT_REMUNERACAO_LIMIT = 10000
+    MAX_REMUNERACAO_LIMIT = 20000
+    DEFAULT_MAX_ANOS_COLETA = 10
+    MAX_MAX_ANOS_COLETA = 15
 
     def __init__(self):
         os.makedirs(self.STORAGE_PATH, exist_ok=True)
@@ -100,6 +105,19 @@ class PortalTransparenciaCollector:
             f"titulo_pagina={page_text[:120]}"
         )
 
+        remuneration_response = self._fetch(self.REMUNERACAO_PAGE_URL)
+        remuneration_soup = BeautifulSoup(remuneration_response.text, "html.parser")
+        remuneration_links = [link.get("href") for link in remuneration_soup.select("a[href]")]
+        has_remuneration_endpoint = "GetRemuneracaoDosFuncionarios" in remuneration_response.text
+        has_remuneration_download = "tipo_download" in remuneration_response.text
+        endpoints_found += int(has_remuneration_endpoint) + int(has_remuneration_download)
+        details.append(
+            f"pagina_remuneracao={self.REMUNERACAO_PAGE_URL}; status_code={remuneration_response.status_code}; "
+            f"links_encontrados={len(remuneration_links)}; contem_endpoint_json="
+            f"{'sim' if has_remuneration_endpoint else 'nao'}; contem_exportacao_csv="
+            f"{'sim' if has_remuneration_download else 'nao'}"
+        )
+
         details.append(f"total_endpoints_exportacoes_encontrados={endpoints_found}")
         return details
 
@@ -125,9 +143,64 @@ class PortalTransparenciaCollector:
             value = min(maximum, value)
         return value
 
+    def _env_is_set(self, name):
+        raw_value = os.getenv(name)
+        return raw_value is not None and raw_value.strip() != ""
+
+    def _decode_text(self, content):
+        for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+            try:
+                return content.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return content.decode("utf-8", errors="replace")
+
+    def _default_reference_month(self):
+        return max(1, datetime.utcnow().month - 1)
+
     def _collect_config(self):
+        ano_base = self._env_int("PORTAL_TRANSPARENCIA_ANO", datetime.utcnow().year, 2000, 2100)
+        ano_inicial = self._env_int("PORTAL_TRANSPARENCIA_ANO_INICIAL", ano_base, 2000, 2100)
+        ano_final = self._env_int("PORTAL_TRANSPARENCIA_ANO_FINAL", ano_base, 2000, 2100)
+        if ano_inicial > ano_final:
+            ano_inicial, ano_final = ano_final, ano_inicial
+
+        max_anos_coleta = self._env_int(
+            "PORTAL_TRANSPARENCIA_MAX_ANOS_COLETA",
+            self.DEFAULT_MAX_ANOS_COLETA,
+            1,
+            self.MAX_MAX_ANOS_COLETA,
+        )
+        total_anos = (ano_final - ano_inicial) + 1
+        if total_anos > max_anos_coleta:
+            ano_inicial = ano_final - (max_anos_coleta - 1)
+            logger.warning(
+                "Janela de anos reduzida por seguranca: PORTAL_TRANSPARENCIA_MAX_ANOS_COLETA=%s; "
+                "novo intervalo=%s-%s",
+                max_anos_coleta,
+                ano_inicial,
+                ano_final,
+            )
+
+        mes_padrao = self._env_int("PORTAL_TRANSPARENCIA_MES", self._default_reference_month(), 1, 12)
+        mes_inicial = self._env_int("PORTAL_TRANSPARENCIA_MES_INICIAL", mes_padrao, 1, 12)
+        mes_final = self._env_int("PORTAL_TRANSPARENCIA_MES_FINAL", mes_padrao, 1, 12)
+        if mes_inicial > mes_final:
+            mes_inicial, mes_final = mes_final, mes_inicial
+
         return {
-            "ano": self._env_int("PORTAL_TRANSPARENCIA_ANO", datetime.utcnow().year, 2000, 2100),
+            "ano": ano_base,
+            "ano_inicial": ano_inicial,
+            "ano_final": ano_final,
+            "max_anos_coleta": max_anos_coleta,
+            "mes": mes_padrao,
+            "mes_inicial": mes_inicial,
+            "mes_final": mes_final,
+            "mes_intervalo_customizado": (
+                self._env_is_set("PORTAL_TRANSPARENCIA_MES")
+                or self._env_is_set("PORTAL_TRANSPARENCIA_MES_INICIAL")
+                or self._env_is_set("PORTAL_TRANSPARENCIA_MES_FINAL")
+            ),
             "limit": self._env_int("PORTAL_TRANSPARENCIA_LIMIT", self.DEFAULT_LIMIT, 1, self.MAX_LIMIT),
             "page_size": self._env_int(
                 "PORTAL_TRANSPARENCIA_PAGE_SIZE",
@@ -153,7 +226,26 @@ class PortalTransparenciaCollector:
                 1,
                 self.MAX_FINANCIAL_LIMIT,
             ),
+            "remuneracao_limit": self._env_int(
+                "PORTAL_TRANSPARENCIA_REMUNERACAO_LIMIT",
+                self.DEFAULT_REMUNERACAO_LIMIT,
+                1,
+                self.MAX_REMUNERACAO_LIMIT,
+            ),
         }
+
+    def _iter_years(self, config):
+        return list(range(config["ano_inicial"], config["ano_final"] + 1))
+
+    def _remuneracao_month_window(self, config, year):
+        if config.get("mes_intervalo_customizado"):
+            return config["mes_inicial"], config["mes_final"]
+
+        current_year = datetime.utcnow().year
+        if year < current_year:
+            return 1, 12
+
+        return 1, self._default_reference_month()
 
     def _licitacoes_params(self, year, page, per_page):
         return {
@@ -318,7 +410,7 @@ class PortalTransparenciaCollector:
             "page": "1",
         }
         response = self._fetch(self.DESPESAS_CLASSIFICACAO_PAGE_URL, params=params)
-        csv_text = response.content.decode("utf-8-sig", errors="ignore")
+        csv_text = self._decode_text(response.content)
         rows = list(csv.DictReader(io.StringIO(csv_text), delimiter=";"))
         return rows, params, response
 
@@ -328,6 +420,31 @@ class PortalTransparenciaCollector:
         writer.writeheader()
         writer.writerow(row)
         return output.getvalue().encode("utf-8")
+
+    def _stable_csv_bytes(self, csv_bytes):
+        text = self._decode_text(csv_bytes)
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+            reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        except csv.Error:
+            reader = csv.DictReader(io.StringIO(text), delimiter=";")
+        fieldnames = reader.fieldnames or []
+        rows = []
+        for row in reader:
+            stable_row = dict(row)
+            # O portal atualiza data_acesso a cada consulta. Ela fica fora do
+            # CSV salvo para que o hash represente os dados de remuneracao, nao
+            # o horario em que este coletor acessou o endpoint.
+            if "data_acesso" in stable_row:
+                stable_row["data_acesso"] = ""
+            rows.append(stable_row)
+
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=";", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        return output.getvalue().encode("utf-8"), rows
 
     def _raw_payload_generic(self, category, endpoint, record, params, response_url, status_code, normalized):
         payload = {
@@ -457,6 +574,129 @@ class PortalTransparenciaCollector:
                 content_hash,
             )
             return duplicate_reason
+
+        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
+        db.add(models.DocumentoBruto(
+            fonte="portal_transparencia",
+            tipo_documento=tipo_documento,
+            titulo=title[:255],
+            url_origem=public_url,
+            data_publicacao=publication_date,
+            data_coleta=datetime.utcnow(),
+            formato="csv",
+            caminho_arquivo=file_path,
+            hash_arquivo=content_hash,
+            hash_texto=None,
+            status_processamento="coletado",
+            erro_processamento=None,
+        ))
+        db.commit()
+        logger.info(
+            "[SALVO] Portal Transparencia CSV %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
+            tipo_documento,
+            title,
+            endpoint,
+            params,
+            status_code,
+            content_hash,
+        )
+        return "salvo"
+
+    def _save_portal_csv_document(
+        self,
+        db,
+        tipo_documento,
+        title,
+        public_url,
+        raw_bytes,
+        params,
+        response_url,
+        status_code,
+        endpoint,
+        publication_date=None,
+    ):
+        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+        hash_duplicate = db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.hash_arquivo == content_hash
+        ).first()
+        if hash_duplicate:
+            logger.info(
+                "[DUPLICADO] Portal Transparencia CSV %s por %s: %s | endpoint=%s | params=%s | hash=%s",
+                tipo_documento,
+                "hash",
+                title,
+                endpoint,
+                params,
+                content_hash,
+            )
+            return "hash"
+
+        url_duplicate = db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.url_origem == public_url
+        ).first()
+        if url_duplicate:
+            file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
+            processed_ids = [
+                item.id for item in db.query(models.DocumentoProcessado.id).filter(
+                    models.DocumentoProcessado.documento_bruto_id == url_duplicate.id
+                ).all()
+            ]
+            if processed_ids:
+                db.query(models.DocumentoChunk).filter(
+                    models.DocumentoChunk.documento_processado_id.in_(processed_ids)
+                ).delete(synchronize_session=False)
+                db.query(models.EntidadeExtraida).filter(
+                    models.EntidadeExtraida.documento_processado_id.in_(processed_ids)
+                ).delete(synchronize_session=False)
+                db.query(models.DocumentoEntidade).filter(
+                    models.DocumentoEntidade.documento_id.in_(processed_ids)
+                ).delete(synchronize_session=False)
+                db.query(models.DocumentoProcessado).filter(
+                    models.DocumentoProcessado.documento_bruto_id == url_duplicate.id
+                ).delete(synchronize_session=False)
+            db.query(models.ServidorRemuneracao).filter(
+                models.ServidorRemuneracao.fonte_documento_id == url_duplicate.id
+            ).delete(synchronize_session=False)
+
+            url_duplicate.titulo = title[:255]
+            url_duplicate.caminho_arquivo = file_path
+            url_duplicate.hash_arquivo = content_hash
+            url_duplicate.status_processamento = "coletado"
+            url_duplicate.erro_processamento = None
+            url_duplicate.atualizado_em = datetime.utcnow()
+            db.commit()
+            logger.info(
+                "[ATUALIZADO] Portal Transparencia CSV %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
+                tipo_documento,
+                title,
+                endpoint,
+                params,
+                status_code,
+                content_hash,
+            )
+            return "salvo"
+
+        query = db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.fonte == "portal_transparencia",
+            models.DocumentoBruto.tipo_documento == tipo_documento,
+            models.DocumentoBruto.url_origem == public_url,
+            models.DocumentoBruto.titulo == title,
+        )
+        if publication_date is None:
+            query = query.filter(models.DocumentoBruto.data_publicacao.is_(None))
+        else:
+            query = query.filter(models.DocumentoBruto.data_publicacao == publication_date)
+        if query.first() is not None:
+            logger.info(
+                "[DUPLICADO] Portal Transparencia CSV %s por chave_composta: %s | endpoint=%s | params=%s | hash=%s",
+                tipo_documento,
+                title,
+                endpoint,
+                params,
+                content_hash,
+            )
+            return "chave_composta"
 
         file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
         db.add(models.DocumentoBruto(
@@ -717,14 +957,270 @@ class PortalTransparenciaCollector:
             logger.error("Erro ao coletar receitas por classificacao: %s\n%s", error, traceback.format_exc())
         return stats
 
+    def _collect_remuneration(self, db, config):
+        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        mes_inicial, mes_final = self._remuneracao_month_window(config, config["ano"])
+        for mes in range(mes_inicial, mes_final + 1):
+            params = {
+                "secretaria": "0",
+                "cargo": "0",
+                "nome": "",
+                "executaConsulta": "true",
+                "limit": str(config["remuneracao_limit"]),
+                "tipo_download": "CSV",
+                "ano": str(config["ano"]),
+                "mes": str(mes),
+            }
+            try:
+                response = self._fetch(self.REMUNERACAO_PAGE_URL, params=params)
+                stable_csv, rows = self._stable_csv_bytes(response.content)
+                stats["encontrado"] += len(rows)
+                if not rows:
+                    logger.warning(
+                        "Portal Transparencia remuneracao sem registros: url=%s status_code=%s params=%s",
+                        response.url,
+                        response.status_code,
+                        params,
+                    )
+                    continue
+
+                title = (
+                    f"Remuneracao dos servidores {config['ano']}/{int(mes):02d} "
+                    "- Prefeitura de Jundiai"
+                )
+                public_url = (
+                    f"{self.REMUNERACAO_PAGE_URL}?"
+                    f"{urlencode({'secretaria': 0, 'cargo': 0, 'nome': '', 'ano': config['ano'], 'mes': mes})}"
+                )
+                result = self._save_portal_csv_document(
+                    db,
+                    "remuneracao_servidores",
+                    title,
+                    public_url,
+                    stable_csv,
+                    params.copy(),
+                    response.url,
+                    response.status_code,
+                    self.REMUNERACAO_PAGE_URL,
+                )
+                stats[result] = stats.get(result, 0) + 1
+                logger.info(
+                    "Portal Transparencia remuneracao: ano=%s mes=%s limite=%s registros_csv=%s resultado=%s "
+                    "intervalo_meses=%s-%s",
+                    config["ano"],
+                    mes,
+                    config["remuneracao_limit"],
+                    len(rows),
+                    result,
+                    mes_inicial,
+                    mes_final,
+                )
+            except Exception as error:
+                db.rollback()
+                stats["erro"] += 1
+                logger.error(
+                    "Erro ao coletar remuneracao de servidores (mes=%s): %s\n%s",
+                    mes,
+                    error,
+                    traceback.format_exc(),
+                )
+        return stats
+
     def _collect_financial_categories(self, db, config):
         return {
             "despesa_secretaria": self._collect_expense_summaries(db, config),
             "contrato": self._collect_contracts(db, config),
             "receita_classificacao": self._collect_revenues(db, config),
+            "remuneracao_servidores": self._collect_remuneration(db, config),
         }
 
+    def _collect_year_window(self):
+        logger.info("Iniciando coleta real do Portal da Transparencia...")
+        started_at = time.monotonic()
+        db = SessionLocal()
+        new_count = 0
+        duplicate_hash_count = 0
+        duplicate_composite_count = 0
+        ignored_count = 0
+        error_count = 0
+        details = []
+
+        log_entry = models.LogColeta(
+            fonte="Portal Transparencia",
+            status="iniciado",
+            mensagem="Coleta real iniciada: investigando HTML, links e endpoints publicos.",
+        )
+        db.add(log_entry)
+        db.commit()
+
+        try:
+            details.extend(self._investigate_sources())
+
+            config = self._collect_config()
+            years = self._iter_years(config)
+            details.append(
+                f"janela_anos={config['ano_inicial']}-{config['ano_final']}; anos_consultados={years}; "
+                f"limite_licitacoes={config['limit']}; page_size_licitacoes={config['page_size']}; "
+                f"max_anos_coleta={config['max_anos_coleta']}"
+            )
+
+            any_record_found = False
+            total_licitacoes_found = 0
+            for year in years:
+                year_config = dict(config)
+                year_config["ano"] = year
+                fetched_records, total_items, requests_info = self._fetch_licitacoes_pages(year_config)
+                total_licitacoes_found += len(fetched_records)
+                any_record_found = any_record_found or bool(fetched_records)
+
+                details.append(
+                    f"categoria=licitacao; ano_consultado={year}; "
+                    f"limite_configurado={year_config['limit']}; tamanho_pagina={year_config['page_size']}; "
+                    f"paginas_consultadas={len(requests_info)}; total_itens_informado={total_items}; "
+                    f"registros_encontrados={len(fetched_records)}"
+                )
+                logger.info(
+                    "Portal Transparencia categoria=licitacao ano=%s limite=%s paginas=%s registros_encontrados=%s total_itens=%s",
+                    year,
+                    year_config["limit"],
+                    len(requests_info),
+                    len(fetched_records),
+                    total_items,
+                )
+
+                for item in fetched_records:
+                    try:
+                        record = item["record"]
+                        params = item["params"]
+                        title = self._build_title(record)
+                        public_url = self._build_public_url(record)
+                        publication_date = None
+                        normalized = self._normalize_record(record, title, public_url)
+                        raw_bytes = self._raw_payload(
+                            record,
+                            params,
+                            item["response_url"],
+                            item["status_code"],
+                            normalized,
+                        )
+                        content_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+                        duplicate_reason = self._duplicate_reason(
+                            db,
+                            content_hash,
+                            public_url,
+                            title,
+                            publication_date,
+                            tipo_documento="licitacao",
+                        )
+                        if duplicate_reason:
+                            if duplicate_reason == "hash":
+                                duplicate_hash_count += 1
+                            else:
+                                duplicate_composite_count += 1
+                            logger.info(
+                                "[DUPLICADO] Licitacao ja cadastrada por %s: %s | endpoint=%s | params=%s | hash=%s",
+                                duplicate_reason,
+                                title,
+                                self.LICITACOES_API_URL,
+                                params,
+                                content_hash,
+                            )
+                            continue
+
+                        file_path = self._save_raw_file(content_hash, raw_bytes)
+                        db.add(models.DocumentoBruto(
+                            fonte="portal_transparencia",
+                            tipo_documento="licitacao",
+                            titulo=title,
+                            url_origem=public_url,
+                            data_publicacao=publication_date,
+                            data_coleta=datetime.utcnow(),
+                            formato="json",
+                            caminho_arquivo=file_path,
+                            hash_arquivo=content_hash,
+                            hash_texto=None,
+                            status_processamento="coletado",
+                            erro_processamento=None,
+                        ))
+                        db.commit()
+                        new_count += 1
+                        logger.info(
+                            "[SALVO] Licitacao salva: %s | endpoint=%s | params=%s | status_code=%s | hash=%s | arquivo=%s",
+                            title,
+                            self.LICITACOES_API_URL,
+                            params,
+                            item["status_code"],
+                            content_hash,
+                            file_path,
+                        )
+                    except Exception as record_error:
+                        error_count += 1
+                        db.rollback()
+                        logger.error(
+                            "Erro ao salvar registro de licitacao (ano=%s): %s\n%s",
+                            year,
+                            record_error,
+                            traceback.format_exc(),
+                        )
+
+                financial_stats = self._collect_financial_categories(db, year_config)
+                for category, stats in financial_stats.items():
+                    found = stats.get("encontrado", 0)
+                    any_record_found = any_record_found or found > 0
+                    new_count += stats.get("salvo", 0)
+                    duplicate_hash_count += stats.get("hash", 0)
+                    duplicate_composite_count += stats.get("chave_composta", 0)
+                    error_count += stats.get("erro", 0)
+                    details.append(
+                        f"categoria={category}; ano_consultado={year}; registros_encontrados={found}; "
+                        f"registros_salvos={stats.get('salvo', 0)}; duplicados_por_hash={stats.get('hash', 0)}; "
+                        f"duplicados_por_chave_composta={stats.get('chave_composta', 0)}; erros={stats.get('erro', 0)}"
+                    )
+
+            if not any_record_found:
+                details.append("nenhum_registro_real_encontrado_na_janela_configurada=sim")
+
+            elapsed_seconds = time.monotonic() - started_at
+            details.append(
+                f"registros_salvos={new_count}; duplicados_por_hash={duplicate_hash_count}; "
+                f"duplicados_por_chave_composta={duplicate_composite_count}; ignorados={ignored_count}; "
+                f"erros={error_count}; tempo_total_segundos={elapsed_seconds:.2f}"
+            )
+            log_entry.status = "sucesso" if error_count == 0 else "parcial"
+            log_entry.mensagem = "Coleta do Portal da Transparencia finalizada. " + " | ".join(details)
+            db.commit()
+            logger.info(
+                "Coleta Portal da Transparencia finalizada: anos=%s; licitacoes_encontradas=%s; "
+                "registros_novos_salvos=%s; duplicados_por_hash=%s; duplicados_por_chave_composta=%s; "
+                "erros=%s; tempo_total=%.2fs",
+                years,
+                total_licitacoes_found,
+                new_count,
+                duplicate_hash_count,
+                duplicate_composite_count,
+                error_count,
+                elapsed_seconds,
+            )
+            return new_count
+        except Exception as error:
+            db.rollback()
+            full_error = traceback.format_exc()
+            logger.error("Erro na coleta do Portal da Transparencia: %s\n%s", error, full_error)
+            log_entry.status = "erro"
+            log_entry.mensagem = (
+                f"Erro na coleta do Portal da Transparencia: {error}. "
+                f"Detalhes anteriores: {' | '.join(details)}. Traceback: {full_error}"
+            )
+            db.commit()
+            return 0
+        finally:
+            db.close()
+
     def collect(self):
+        return self._collect_year_window()
+
+    def _collect_legacy(self):
         logger.info("Iniciando coleta real do Portal da Transparência...")
         started_at = time.monotonic()
         db = SessionLocal()

@@ -130,6 +130,11 @@ def _extract_dates(text):
 def _load_json(path):
     if not path:
         return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as file:
+            return json.load(file)
+    except Exception:
+        return None
 
 
 def _load_csv_row(path):
@@ -147,11 +152,23 @@ def _load_csv_row(path):
             return next(reader, None)
     except Exception:
         return None
+
+
+def _load_csv_rows(path):
+    if not path:
+        return []
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as file:
-            return json.load(file)
+        with open(path, "r", encoding="utf-8-sig", errors="ignore", newline="") as file:
+            sample = file.read(4096)
+            file.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+                reader = csv.DictReader(file, dialect=dialect)
+            except csv.Error:
+                reader = csv.DictReader(file, delimiter=";")
+            return list(reader)
     except Exception:
-        return None
+        return []
 
 
 def _read_nested(data, *keys):
@@ -173,6 +190,29 @@ def _parse_year(doc, raw_json):
     source = " ".join(filter(None, [doc.titulo, doc.url_origem]))
     match = re.search(r"\b(20\d{2})\b", source)
     return int(match.group(1)) if match else None
+
+
+def _parse_int(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _parse_datetime(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    for fmt in ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
 
 
 def _parse_money(value):
@@ -240,6 +280,9 @@ def extract_entities_for_document(db, processed_doc):
         ).delete()
         db.query(models.Receita).filter(
             models.Receita.fonte_documento_id == doc.id
+        ).delete()
+        db.query(models.ServidorRemuneracao).filter(
+            models.ServidorRemuneracao.fonte_documento_id == doc.id
         ).delete()
 
     found_themes = []
@@ -354,6 +397,29 @@ def extract_entities_for_document(db, processed_doc):
                 data_referencia=doc.data_publicacao,
                 url_origem=doc.url_origem,
             ))
+        elif tipo_documento == "remuneracao_servidores":
+            rows = _load_csv_rows(doc.caminho_arquivo)
+            ano = _parse_year(doc, raw_json)
+            mes_match = re.search(r"\bmes=(\d{1,2})\b", doc.url_origem or "")
+            mes = _parse_int(mes_match.group(1)) if mes_match else None
+            for row in rows:
+                db.add(models.ServidorRemuneracao(
+                    fonte_documento_id=doc.id,
+                    ano=ano,
+                    mes=mes,
+                    codigo_funcionario=row.get("codigo") or row.get("codigo_funcionario"),
+                    nome_funcionario=row.get("nome") or row.get("nome_funcionario"),
+                    secretaria=row.get("secretaria") or row.get("nome_secretaria"),
+                    cargo=row.get("cargo") or row.get("descricao_cargo"),
+                    provimento=row.get("provimento") or row.get("descricao_provimento"),
+                    carga_horaria=row.get("carga_horaria") or row.get("horas_trabalhadas"),
+                    data_admissao=_parse_datetime(row.get("data_admissao")),
+                    valor_total_venc=_parse_money(row.get("valor_total_venc")),
+                    valor_total_mes=_parse_money(row.get("valor_total_mes")),
+                    valor_salario_base=_parse_money(row.get("valor_salario_base")),
+                    data_atualizacao=_parse_datetime(row.get("data_atualizacao")),
+                    url_origem=doc.url_origem,
+                ))
 
     db.commit()
     return True

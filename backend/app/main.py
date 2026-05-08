@@ -162,6 +162,32 @@ def analytics_receitas(
     return analytics_service.receitas_analytics(db, ano=ano, termo=termo, limit=limit)
 
 
+@app.get("/analytics/servidores/remuneracao")
+def analytics_servidores_remuneracao(
+    ano: Optional[int] = None,
+    mes: Optional[int] = None,
+    secretaria: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return analytics_service.servidores_remuneracao(
+        db,
+        ano=ano,
+        mes=mes,
+        secretaria=secretaria,
+        limit=limit,
+    )
+
+
+@app.get("/analytics/auditoria/remuneracao")
+def analytics_auditoria_remuneracao(
+    ano: int = Query(..., ge=2000, le=2100),
+    ate_mes: int = Query(12, ge=1, le=12),
+    db: Session = Depends(get_db),
+):
+    return analytics_service.auditoria_remuneracao_mensal(db, ano=ano, ate_mes=ate_mes)
+
+
 @app.get("/analytics/camara/financeiro")
 def analytics_camara_financeiro(ano: Optional[int] = None):
     return analytics_service.camara_financeiro(ano)

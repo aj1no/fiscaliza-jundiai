@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fiscaliza Jundiaí | Painel público</title>
     <meta name="description" content="Painel público para acompanhar documentos oficiais de Jundiaí/SP.">
-    <link rel="stylesheet" href="index.css?v=20260507-1">
+    <link rel="stylesheet" href="index.css?v=20260507-5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -15,12 +15,6 @@
         <div>
             <p class="eyebrow">Painel público</p>
             <h1>Fiscaliza Jundiaí</h1>
-        </div>
-        <div class="topbar-actions">
-            <div class="api-status" id="api-status-indicator">
-                <span class="status-dot"></span>
-                <span>API <strong id="status-text">conectando...</strong></span>
-            </div>
         </div>
     </header>
 
@@ -56,6 +50,29 @@
             </button>
         </nav>
 
+        <section class="ask-panel" aria-labelledby="ask-title">
+            <div class="ask-heading">
+                <div>
+                    <p class="eyebrow">Pesquisa cidadã</p>
+                    <h2 id="ask-title">Pergunte sobre os dados de Jundiaí</h2>
+                </div>
+                <span class="ask-badge">Fontes oficiais</span>
+            </div>
+            <form class="ask-form" id="ask-form">
+                <label class="ask-field" for="ask-input">
+                    <span>Digite sua pergunta</span>
+                    <input
+                        id="ask-input"
+                        type="search"
+                        autocomplete="off"
+                    >
+                </label>
+                <button class="btn-primary ask-submit" type="submit">Pesquisar</button>
+                <button class="btn-secondary ask-clear" id="ask-clear" type="button">Limpar</button>
+            </form>
+            <div class="ask-result" id="ask-result" hidden></div>
+        </section>
+
         <section class="finance-panel tab-panel active" id="tab-prefeitura" data-tab-panel="prefeitura" aria-labelledby="finance-title">
             <div class="finance-header">
                 <div>
@@ -81,6 +98,17 @@
                     <strong id="finance-balance">Carregando...</strong>
                     <small id="finance-balance-note">Arrecadado menos pago</small>
                 </article>
+            </div>
+
+            <div class="charts-row">
+                <div class="chart-container">
+                    <p class="eyebrow">Distribuição por Secretaria</p>
+                    <canvas id="chart-prefeitura-expenses"></canvas>
+                </div>
+                <div class="chart-container">
+                    <p class="eyebrow">Arrecadação vs Gasto</p>
+                    <canvas id="chart-prefeitura-comparison"></canvas>
+                </div>
             </div>
 
             <div class="finance-details">
@@ -137,6 +165,13 @@
                     <strong id="camara-finance-balance">Carregando...</strong>
                     <small id="camara-finance-balance-note">Receita menos gasto pago</small>
                 </article>
+            </div>
+
+            <div class="charts-row single">
+                <div class="chart-container">
+                    <p class="eyebrow">Distribuição por Ação Orçamentária</p>
+                    <canvas id="chart-camara-expenses"></canvas>
+                </div>
             </div>
 
             <div class="finance-details">
@@ -214,6 +249,7 @@
         <p>Dados extraídos de fontes oficiais. A fonte primária continua sendo o órgão público responsável.</p>
     </footer>
 
-    <script src="app.js?v=20260507-1"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="app.js?v=20260507-10"></script>
 </body>
 </html>
