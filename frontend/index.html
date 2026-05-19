@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Fiscaliza Jundiaí | Painel público</title>
     <meta name="description" content="Painel público para acompanhar documentos oficiais de Jundiaí/SP.">
-    <link rel="stylesheet" href="index.css?v=20260507-5">
+    <link rel="stylesheet" href="index.css?v=20260518-1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -19,25 +19,6 @@
     </header>
 
     <main>
-        <section class="summary-strip" aria-label="Resumo de documentos por fonte">
-            <article class="summary-card summary-total">
-                <span class="summary-label">Documentos carregados</span>
-                <strong id="total-docs">0</strong>
-            </article>
-            <article class="summary-card">
-                <span class="summary-label">Imprensa Oficial</span>
-                <strong id="count-imprensa_oficial">0</strong>
-            </article>
-            <article class="summary-card">
-                <span class="summary-label">Câmara Municipal</span>
-                <strong id="count-camara_sessoes">0</strong>
-            </article>
-            <article class="summary-card">
-                <span class="summary-label">Portal da Transparência</span>
-                <strong id="count-portal_transparencia">0</strong>
-            </article>
-        </section>
-
         <nav class="tabs-nav" id="tabs-nav" aria-label="Seções do painel">
             <button class="tab-button active" type="button" data-tab="prefeitura" aria-selected="true" aria-controls="tab-prefeitura">
                 Prefeitura
@@ -77,28 +58,29 @@
             <div class="finance-header">
                 <div>
                     <p class="eyebrow">Portal da Transparência</p>
-                    <h2 id="finance-title">Arrecadação e gastos do município</h2>
+                    <h2 id="finance-title">Arrecadação e gastos observados do município</h2>
                 </div>
                 <span class="finance-year" id="finance-year">Ano atual</span>
             </div>
 
             <div class="finance-grid">
                 <article class="finance-card finance-revenue">
-                    <span class="finance-label">Arrecadado</span>
+                    <span class="finance-label">Valor coletado (arrecadação)</span>
                     <strong id="finance-revenue">Carregando...</strong>
                     <small id="finance-revenue-note">Receitas coletadas</small>
                 </article>
                 <article class="finance-card finance-expense">
-                    <span class="finance-label">Gasto pago</span>
+                    <span class="finance-label">Valor coletado (gasto pago)</span>
                     <strong id="finance-paid">Carregando...</strong>
                     <small id="finance-expense-note">Despesas por secretaria</small>
                 </article>
                 <article class="finance-card finance-balance">
-                    <span class="finance-label">Saldo simples</span>
+                    <span class="finance-label">Execução financeira observada</span>
                     <strong id="finance-balance">Carregando...</strong>
-                    <small id="finance-balance-note">Arrecadado menos pago</small>
+                    <small id="finance-balance-note">Diferença entre valores coletados</small>
                 </article>
             </div>
+            <div class="quality-warning" id="finance-quality-warning" hidden></div>
 
             <div class="charts-row">
                 <div class="chart-container">
@@ -123,8 +105,8 @@
                     </div>
                     <div class="finance-health finance-health-kpi finance-health-unknown" id="finance-health-card">
                         <span>
-                            Saúde financeira
-                            <small id="finance-health-note">Indicador simplificado</small>
+                            Indicador de execução
+                            <small id="finance-health-note">Leitura de apoio</small>
                         </span>
                         <strong id="finance-health-status" class="finance-health-status">Avaliando...</strong>
                     </div>
@@ -144,28 +126,29 @@
             <div class="finance-header">
                 <div>
                     <p class="eyebrow">Transparência da Câmara</p>
-                    <h2 id="camara-finance-title">Receitas e gastos da Câmara Municipal</h2>
+                    <h2 id="camara-finance-title">Receitas e gastos observados da Câmara Municipal</h2>
                 </div>
                 <span class="finance-year camara-year" id="camara-finance-year">Ano atual</span>
             </div>
 
             <div class="finance-grid">
                 <article class="finance-card finance-revenue">
-                    <span class="finance-label">Receita realizada</span>
+                    <span class="finance-label">Valor coletado (receita)</span>
                     <strong id="camara-finance-revenue">Carregando...</strong>
                     <small id="camara-finance-revenue-note">Receitas coletadas</small>
                 </article>
                 <article class="finance-card finance-expense">
-                    <span class="finance-label">Gasto pago</span>
+                    <span class="finance-label">Valor coletado (gasto pago)</span>
                     <strong id="camara-finance-paid">Carregando...</strong>
                     <small id="camara-finance-expense-note">Despesas por ação</small>
                 </article>
                 <article class="finance-card finance-balance">
-                    <span class="finance-label">Saldo simples</span>
+                    <span class="finance-label">Execução financeira observada</span>
                     <strong id="camara-finance-balance">Carregando...</strong>
-                    <small id="camara-finance-balance-note">Receita menos gasto pago</small>
+                    <small id="camara-finance-balance-note">Diferença entre valores coletados</small>
                 </article>
             </div>
+            <div class="quality-warning" id="camara-finance-quality-warning" hidden></div>
 
             <div class="charts-row single">
                 <div class="chart-container">
@@ -190,8 +173,8 @@
                     </div>
                     <div class="finance-health finance-health-kpi finance-health-unknown" id="camara-finance-health-card">
                         <span>
-                            Saúde financeira
-                            <small id="camara-finance-health-note">Indicador simplificado</small>
+                            Indicador de execução
+                            <small id="camara-finance-health-note">Leitura de apoio</small>
                         </span>
                         <strong id="camara-finance-health-status" class="finance-health-status">Avaliando...</strong>
                     </div>
@@ -208,6 +191,24 @@
         </section>
 
         <div class="tab-panel documents-tab" id="tab-documentos" data-tab-panel="documentos">
+        <section id="documents-summary" class="summary-strip" aria-label="Resumo de documentos por fonte">
+            <article class="summary-card summary-total">
+                <span class="summary-label">Documentos carregados</span>
+                <strong id="total-docs">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Imprensa Oficial</span>
+                <strong id="count-imprensa_oficial">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Câmara Municipal</span>
+                <strong id="count-camara_sessoes">0</strong>
+            </article>
+            <article class="summary-card">
+                <span class="summary-label">Portal da Transparência</span>
+                <strong id="count-portal_transparencia">0</strong>
+            </article>
+        </section>
         <section class="filters-bar" aria-label="Filtros de documentos">
             <label class="field field-search">
                 <span>Busca</span>
@@ -250,6 +251,6 @@
     </footer>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="app.js?v=20260507-10"></script>
+    <script src="app.js?v=20260518-1"></script>
 </body>
 </html>

@@ -2,6 +2,25 @@
 
 Este documento descreve o estado atual do coletor real do Portal da Transparencia de Jundiai.
 
+## Estado atual do coletor
+
+- Endpoint principal usado no MVP robusto de licitacoes: `https://web21.cijun.sp.gov.br/PMJ/YC/Despesas/GetDespesaPorLicitacao`
+- Categoria robusta no MVP: `licitacao`
+- Outras categorias reais ativas: `despesa_secretaria`, `contrato`, `receita_classificacao`, `remuneracao_servidores`
+- Tipo de documento salvo em `documentos_brutos`: conforme categoria real coletada
+- Campos normalizados: `fonte`, `tipo_documento`, `titulo`, `ano`, `objeto`, `secretaria`, `fornecedor`, `cnpj`, `valor_*`, `url_origem`, `hash_arquivo`, `status_processamento`
+- Campos ausentes no endpoint permanecem `null` (ex.: valor, orgao e datas por item quando nao fornecidos)
+- Regra de paginacao (licitacoes): `page` + `per_page` fixo por execucao (`PORTAL_TRANSPARENCIA_PAGE_SIZE`)
+- Regra de deduplicacao principal: `hash_arquivo`
+- Regra de deduplicacao fallback: `fonte + tipo_documento + url_origem + titulo + data_publicacao`
+- Dados financeiros vivos (despesas/contratos/receitas/remuneracao) usam atualizacao por chave natural quando o hash muda
+- Snapshot de coleta: tabela `coleta_snapshots` com completude, limite aplicado, endpoint, parametros, status_code e hash do lote
+- Limitacoes conhecidas:
+  - endpoints podem retornar dados agregados por hierarquia
+  - quando limite de coleta e atingido, confiabilidade sai como parcial
+  - sem linha consolidada confiavel, analiticos marcam `inseguro_para_soma`
+  - os primeiros ~100 registros historicos podem ter deduplicado por chave composta (coletas anteriores); os registros novos ja seguem hash estavel com atualizacao controlada
+
 ## Fonte oficial
 
 - Portal publico: `https://transparencia.jundiai.sp.gov.br/`
@@ -121,6 +140,8 @@ fonte + tipo_documento + url_origem + titulo + data_publicacao
 
 Tambem ha protecao pratica por `url_origem`, importante para registros financeiros que podem ter sido coletados antes por JSON e depois por CSV.
 
+Para dados financeiros vivos, a URL sozinha nao congela o registro: quando o conteudo muda (hash diferente), o documento e atualizado e reprocessado.
+
 No payload bruto usado para hash, `data_coleta` fica `null` de proposito para manter o hash estavel entre execucoes. A data real da coleta fica salva em `documentos_brutos.data_coleta`.
 
 ## Variaveis de ambiente
@@ -163,7 +184,7 @@ Se quiser forcar um intervalo fixo para todos os anos, defina `PORTAL_TRANSPAREN
 Com Docker Compose rodando:
 
 ```bash
-curl -X POST http://localhost:8000/collect/manual
+curl -X POST http://localhost:8000/collect/manual -H "X-Admin-Token: SEU_TOKEN"
 ```
 
 Consultar documentos do portal:
@@ -182,6 +203,12 @@ Consultar receitas:
 
 ```bash
 curl "http://localhost:8000/analytics/receitas?ano=2026"
+```
+
+Exemplo com metadados de completude:
+
+```bash
+curl "http://localhost:8000/analytics/receitas?ano=2026" | jq '.metadados'
 ```
 
 ## Logs esperados

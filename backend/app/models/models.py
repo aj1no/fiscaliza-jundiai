@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Date, Boolean
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Date, Boolean, Numeric
 from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
 import enum
@@ -16,7 +16,9 @@ class DocumentoBruto(Base):
     fonte = Column(String(100), nullable=False)
     tipo_documento = Column(String(100))
     titulo = Column(String(255))
-    url_origem = Column(String(500), unique=True)
+    # URL pode se repetir em dados financeiros vivos (mesmo endpoint, conteudo atualizado).
+    # A deduplicacao/atualizacao deve ser controlada pelo coletor usando hash e chave natural.
+    url_origem = Column(String(500), index=True)
     data_publicacao = Column(DateTime, index=True)
     data_coleta = Column(DateTime, default=datetime.utcnow)
     formato = Column(String(20))
@@ -143,9 +145,9 @@ class Despesa(Base):
     fornecedor = Column(String(255))
     cnpj = Column(String(32))
     objeto = Column(Text)
-    valor_empenhado = Column(Float)
-    valor_liquidado = Column(Float)
-    valor_pago = Column(Float)
+    valor_empenhado = Column(Numeric(18, 2))
+    valor_liquidado = Column(Numeric(18, 2))
+    valor_pago = Column(Numeric(18, 2))
     data_referencia = Column(DateTime)
     url_origem = Column(String(500))
     criado_em = Column(DateTime, default=datetime.utcnow)
@@ -160,9 +162,9 @@ class Receita(Base):
     ano = Column(Integer, index=True)
     classificacao = Column(String(255), index=True)
     descricao = Column(Text)
-    valor_orcado = Column(Float)
-    valor_arrecadado = Column(Float)
-    percentual = Column(Float)
+    valor_orcado = Column(Numeric(18, 2))
+    valor_arrecadado = Column(Numeric(18, 2))
+    percentual = Column(Numeric(12, 6))
     data_referencia = Column(DateTime)
     url_origem = Column(String(500))
     criado_em = Column(DateTime, default=datetime.utcnow)
@@ -183,11 +185,34 @@ class ServidorRemuneracao(Base):
     provimento = Column(String(120))
     carga_horaria = Column(String(40))
     data_admissao = Column(DateTime)
-    valor_total_venc = Column(Float)
-    valor_total_mes = Column(Float)
-    valor_salario_base = Column(Float)
+    valor_total_venc = Column(Numeric(18, 2))
+    valor_total_mes = Column(Numeric(18, 2))
+    valor_salario_base = Column(Numeric(18, 2))
     data_atualizacao = Column(DateTime)
     url_origem = Column(String(500))
     criado_em = Column(DateTime, default=datetime.utcnow)
 
     fonte_documento = relationship("DocumentoBruto")
+
+
+class ColetaSnapshot(Base):
+    __tablename__ = "coleta_snapshots"
+    id = Column(Integer, primary_key=True, index=True)
+    fonte = Column(String(100), index=True, nullable=False)
+    categoria = Column(String(100), index=True, nullable=False)
+    tipo_documento = Column(String(100), index=True)
+    ano = Column(Integer, index=True)
+    endpoint = Column(String(500))
+    parametros = Column(Text)
+    status_code = Column(Integer)
+    coleta_completa = Column(Boolean, default=False)
+    registros_encontrados = Column(Integer)
+    registros_coletados = Column(Integer)
+    registros_novos = Column(Integer, default=0)
+    registros_atualizados = Column(Integer, default=0)
+    limite_aplicado = Column(Integer)
+    total_itens_informado = Column(Integer)
+    hash_conteudo = Column(String(64), index=True)
+    nivel_confiabilidade = Column(String(40), default="parcial")
+    observacoes = Column(Text)
+    criado_em = Column(DateTime, default=datetime.utcnow, index=True)

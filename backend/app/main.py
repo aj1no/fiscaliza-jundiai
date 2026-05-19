@@ -1,4 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
+from collections import defaultdict, deque
+from threading import Lock
+from time import monotonic
+from fastapi import FastAPI, Depends, HTTPException, Query, Header, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import os
@@ -16,6 +19,108 @@ from fastapi.middleware.cors import CORSMiddleware
 # Nota: Em producao, recomenda-se usar migracoes (Alembic)
 models.Base.metadata.create_all(bind=engine)
 
+
+def apply_runtime_schema_fixes() -> None:
+    """
+    Ajustes idempotentes para ambientes MVP sem Alembic:
+    - remove deduplicacao forcada por URL (inadequada para dados financeiros vivos)
+    - converte colunas monetarias para NUMERIC com precisao de centavos
+    """
+    try:
+        with engine.begin() as conn:
+            if conn.dialect.name != "postgresql":
+                return
+
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE IF EXISTS documentos_brutos
+                    DROP CONSTRAINT IF EXISTS documentos_brutos_url_origem_key
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_documentos_brutos_url_origem
+                    ON documentos_brutos (url_origem)
+                    """
+                )
+            )
+
+            numeric_alters = [
+                (
+                    "despesas",
+                    "valor_empenhado",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_empenhado IS NULL THEN NULL ELSE round(valor_empenhado::numeric, 2) END",
+                ),
+                (
+                    "despesas",
+                    "valor_liquidado",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_liquidado IS NULL THEN NULL ELSE round(valor_liquidado::numeric, 2) END",
+                ),
+                (
+                    "despesas",
+                    "valor_pago",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_pago IS NULL THEN NULL ELSE round(valor_pago::numeric, 2) END",
+                ),
+                (
+                    "receitas",
+                    "valor_orcado",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_orcado IS NULL THEN NULL ELSE round(valor_orcado::numeric, 2) END",
+                ),
+                (
+                    "receitas",
+                    "valor_arrecadado",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_arrecadado IS NULL THEN NULL ELSE round(valor_arrecadado::numeric, 2) END",
+                ),
+                (
+                    "receitas",
+                    "percentual",
+                    "numeric(12,6)",
+                    "CASE WHEN percentual IS NULL THEN NULL ELSE percentual::numeric(12,6) END",
+                ),
+                (
+                    "servidores_remuneracao",
+                    "valor_total_venc",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_total_venc IS NULL THEN NULL ELSE round(valor_total_venc::numeric, 2) END",
+                ),
+                (
+                    "servidores_remuneracao",
+                    "valor_total_mes",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_total_mes IS NULL THEN NULL ELSE round(valor_total_mes::numeric, 2) END",
+                ),
+                (
+                    "servidores_remuneracao",
+                    "valor_salario_base",
+                    "numeric(18,2)",
+                    "CASE WHEN valor_salario_base IS NULL THEN NULL ELSE round(valor_salario_base::numeric, 2) END",
+                ),
+            ]
+
+            for table_name, column_name, target_type, using_expression in numeric_alters:
+                conn.execute(
+                    text(
+                        f"""
+                        ALTER TABLE IF EXISTS {table_name}
+                        ALTER COLUMN {column_name} TYPE {target_type}
+                        USING {using_expression}
+                        """
+                    )
+                )
+    except Exception as exc:
+        print(f"[WARN] Falha ao aplicar ajustes de schema em runtime: {exc}")
+
+
+apply_runtime_schema_fixes()
+
 app = FastAPI(title="Fiscaliza Jundiai - API", version="2.1.0")
 
 app.add_middleware(
@@ -29,6 +134,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+ADMIN_RATE_WINDOW_SECONDS = int(os.getenv("ADMIN_RATE_WINDOW_SECONDS", "60"))
+ADMIN_RATE_LIMIT_COLLECT = int(os.getenv("ADMIN_RATE_LIMIT_COLLECT", "2"))
+ADMIN_RATE_LIMIT_ANALYTICS = int(os.getenv("ADMIN_RATE_LIMIT_ANALYTICS", "1"))
+ADMIN_RATE_LIMIT_RAG = int(os.getenv("ADMIN_RATE_LIMIT_RAG", "1"))
+
+_admin_rate_hits = defaultdict(deque)
+_admin_rate_lock = Lock()
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_rate_limit(key: str, max_calls: int, window_seconds: int) -> None:
+    now = monotonic()
+    with _admin_rate_lock:
+        bucket = _admin_rate_hits[key]
+        while bucket and (now - bucket[0]) > window_seconds:
+            bucket.popleft()
+        if len(bucket) >= max_calls:
+            raise HTTPException(
+                status_code=429,
+                detail="Muitas chamadas administrativas em pouco tempo. Tente novamente em instantes.",
+            )
+        bucket.append(now)
+
+
+def require_admin(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+) -> None:
+    if not ADMIN_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Endpoint administrativo indisponivel: ADMIN_TOKEN nao configurado.",
+        )
+    if x_admin_token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Nao autorizado")
+
+
+def _admin_guard(request: Request, scope: str, max_calls: int) -> None:
+    rate_key = f"{scope}:{_client_ip(request)}"
+    _enforce_rate_limit(rate_key, max_calls=max_calls, window_seconds=ADMIN_RATE_WINDOW_SECONDS)
+
+
+def admin_collect_guard(request: Request, _: None = Depends(require_admin)) -> None:
+    _admin_guard(request, "collect_manual", ADMIN_RATE_LIMIT_COLLECT)
+
+
+def admin_analytics_guard(request: Request, _: None = Depends(require_admin)) -> None:
+    _admin_guard(request, "analytics_process", ADMIN_RATE_LIMIT_ANALYTICS)
+
+
+def admin_rag_guard(request: Request, _: None = Depends(require_admin)) -> None:
+    _admin_guard(request, "rag_index", ADMIN_RATE_LIMIT_RAG)
 
 
 @app.get("/")
@@ -61,16 +222,34 @@ def health_check(db: Session = Depends(get_db)):
 
 
 @app.post("/collect/manual")
-def trigger_manual_collect():
+def trigger_manual_collect(_: None = Depends(admin_collect_guard)):
     task = worker.run_all_collectors.delay()
     return {"message": "Coleta manual iniciada", "task_id": task.id}
+
+
+@app.get("/tasks/{task_id}")
+def get_task_status(task_id: str, _: None = Depends(require_admin)):
+    task_result = worker.celery_app.AsyncResult(task_id)
+    payload = {
+        "task_id": task_id,
+        "status": task_result.state,
+        "ready": task_result.ready(),
+    }
+
+    if task_result.state == "FAILURE":
+        payload["error"] = str(task_result.result)
+        payload["traceback"] = task_result.traceback
+    elif task_result.ready():
+        payload["result"] = task_result.result
+
+    return payload
 
 
 @app.get("/documents", response_model=List[schemas.DocumentoBruto])
 def list_documents(
     q: Optional[str] = None,
     fonte: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     query = db.query(models.DocumentoBruto)
@@ -94,6 +273,7 @@ def get_document(doc_id: int, db: Session = Depends(get_db)):
 @app.get("/search")
 def search_documents(
     q: str = Query(..., min_length=1),
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
     results = db.query(models.DocumentoBruto).join(
@@ -108,13 +288,16 @@ def search_documents(
             models.DocumentoProcessado.texto_extraido.ilike(f"%{q}%"),
             models.DocumentoProcessado.texto_limpo.ilike(f"%{q}%"),
         )
-    ).limit(50).all()
+    ).limit(limit).all()
 
     return results
 
 
 @app.post("/analytics/process")
-def trigger_analytics_processing(limit: Optional[int] = None):
+def trigger_analytics_processing(
+    limit: Optional[int] = Query(default=None, ge=1, le=5000),
+    _: None = Depends(admin_analytics_guard),
+):
     task = worker.process_all_entities.delay(limit)
     return {"message": "Processamento analitico iniciado", "task_id": task.id}
 
@@ -156,7 +339,7 @@ def analytics_gastos_secretarias(
 def analytics_receitas(
     ano: Optional[int] = None,
     termo: Optional[str] = None,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=2000),
     db: Session = Depends(get_db),
 ):
     return analytics_service.receitas_analytics(db, ano=ano, termo=termo, limit=limit)
@@ -167,7 +350,7 @@ def analytics_servidores_remuneracao(
     ano: Optional[int] = None,
     mes: Optional[int] = None,
     secretaria: Optional[str] = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
     return analytics_service.servidores_remuneracao(
@@ -194,19 +377,19 @@ def analytics_camara_financeiro(ano: Optional[int] = None):
 
 
 @app.get("/analytics/temas")
-def analytics_temas(limit: int = 20, db: Session = Depends(get_db)):
+def analytics_temas(limit: int = Query(20, ge=1, le=200), db: Session = Depends(get_db)):
     return analytics_service.temas_frequentes(db, limit=limit)
 
 
 @app.get("/analytics/bairros")
-def analytics_bairros(limit: int = 20, db: Session = Depends(get_db)):
+def analytics_bairros(limit: int = Query(20, ge=1, le=200), db: Session = Depends(get_db)):
     return analytics_service.bairros_frequentes(db, limit=limit)
 
 
 @app.get("/analytics/secretarias")
 def analytics_secretarias(
     tipo_documento: Optional[str] = None,
-    limit: int = 20,
+    limit: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
     return analytics_service.secretarias_frequentes(db, tipo_documento=tipo_documento, limit=limit)
@@ -226,14 +409,18 @@ def rag(q: str = Query(..., min_length=1), db: Session = Depends(get_db)):
 @app.get("/rag/search")
 def rag_search(
     q: str = Query(..., min_length=1),
-    limit: int = 8,
+    limit: int = Query(8, ge=1, le=30),
     db: Session = Depends(get_db),
 ):
     return analytics_service.retrieve_chunks(db, q, limit=limit)
 
 
 @app.post("/rag/index")
-def trigger_rag_index(limit: Optional[int] = None, force: bool = False):
+def trigger_rag_index(
+    limit: Optional[int] = Query(default=None, ge=1, le=10000),
+    force: bool = False,
+    _: None = Depends(admin_rag_guard),
+):
     task = worker.process_all_document_chunks.delay(limit, force)
     return {"message": "Indexacao RAG iniciada", "task_id": task.id}
 

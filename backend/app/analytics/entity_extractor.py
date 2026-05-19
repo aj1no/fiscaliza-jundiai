@@ -3,6 +3,7 @@ import csv
 import re
 import unicodedata
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import or_
 
@@ -218,15 +219,19 @@ def _parse_datetime(value):
 def _parse_money(value):
     if value in (None, ""):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(value))
     text = str(value)
     text = re.sub(r"[^\d,.-]", "", text)
     if "," in text:
         text = text.replace(".", "").replace(",", ".")
     try:
-        return float(text)
-    except Exception:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
         return None
 
 

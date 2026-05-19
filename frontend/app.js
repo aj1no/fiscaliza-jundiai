@@ -1,4 +1,4 @@
-const API_URL = 'http://localhost:8000';
+const API_URL = window.API_URL || `${window.location.protocol}//${window.location.hostname}:8000`;
 const DOCUMENT_LIMIT = 500;
 const PAGE_SIZE = 10;
 const FINANCIAL_YEAR = new Date().getFullYear();
@@ -50,6 +50,21 @@ function getElement(id) {
     return document.getElementById(id);
 }
 
+function moveSummaryToDocumentsTab() {
+    const summaryStrip = getElement('documents-summary');
+    const documentsTab = getElement('tab-documentos');
+    if (!summaryStrip || !documentsTab) return;
+
+    const filtersBar = documentsTab.querySelector('.filters-bar');
+    if (summaryStrip.parentElement !== documentsTab) {
+        if (filtersBar) {
+            documentsTab.insertBefore(summaryStrip, filtersBar);
+        } else {
+            documentsTab.prepend(summaryStrip);
+        }
+    }
+}
+
 function escapeHtml(value) {
     return String(value ?? '')
         .replaceAll('&', '&amp;')
@@ -77,6 +92,13 @@ function formatDate(doc) {
     const date = new Date(rawDate);
     if (Number.isNaN(date.getTime())) return 'Sem data';
     return date.toLocaleDateString('pt-BR');
+}
+
+function formatDateTime(value) {
+    if (!value) return 'não informada';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'não informada';
+    return date.toLocaleString('pt-BR');
 }
 
 function formatMoney(value) {
@@ -107,6 +129,98 @@ function numberOrNull(value) {
     if (value === null || value === undefined || value === '') return null;
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : null;
+}
+
+function reliabilityRank(level) {
+    const ranks = {
+        consolidado: 0,
+        parcial: 1,
+        inseguro_para_soma: 2,
+    };
+    return ranks[level] ?? 1;
+}
+
+function worstReliabilityLevel(levels) {
+    const valid = levels.filter(Boolean);
+    if (!valid.length) return 'parcial';
+    return valid.reduce((worst, current) => (
+        reliabilityRank(current) > reliabilityRank(worst) ? current : worst
+    ), valid[0]);
+}
+
+function formatReliabilityLabel(level) {
+    if (level === 'consolidado') return 'Consolidado';
+    if (level === 'inseguro_para_soma') return 'Inseguro para soma';
+    return 'Parcial';
+}
+
+function renderQualityWarning(elementId, metadadosList) {
+    const warning = getElement(elementId);
+    if (!warning) return;
+    const items = (Array.isArray(metadadosList) ? metadadosList : [metadadosList])
+        .filter(Boolean);
+    if (!items.length) {
+        warning.hidden = true;
+        warning.innerHTML = '';
+        return;
+    }
+
+    const level = worstReliabilityLevel(items.map((item) => item.nivel_confiabilidade));
+    const shouldWarn = level !== 'consolidado' || items.some((item) => item.coleta_completa === false);
+    if (!shouldWarn) {
+        warning.hidden = true;
+        warning.innerHTML = '';
+        return;
+    }
+
+    const observations = [];
+    const collectedSummaries = [];
+    const lastCollectDates = [];
+    items.forEach((item) => {
+        (item.observacoes || []).forEach((note) => {
+            const text = String(note || '').trim();
+            if (text) observations.push(text);
+        });
+        if (item.limite_aplicado !== null && item.limite_aplicado !== undefined) {
+            observations.push(`Limite aplicado na coleta: ${item.limite_aplicado}`);
+        }
+        const encontrados = Number.isFinite(Number(item.registros_encontrados))
+            ? Number(item.registros_encontrados)
+            : null;
+        const coletados = Number.isFinite(Number(item.registros_coletados))
+            ? Number(item.registros_coletados)
+            : null;
+        const novos = Number.isFinite(Number(item.registros_novos))
+            ? Number(item.registros_novos)
+            : null;
+        const atualizados = Number.isFinite(Number(item.registros_atualizados))
+            ? Number(item.registros_atualizados)
+            : null;
+        if (encontrados !== null || coletados !== null) {
+            let msg = `Registros processados: ${coletados ?? 0} de ${encontrados ?? 0}.`;
+            if (novos !== null || atualizados !== null) {
+                msg += ` Salvos: ${novos ?? 0}, Atualizados: ${atualizados ?? 0}.`;
+            }
+            collectedSummaries.push(msg);
+        }
+        lastCollectDates.push(`Ultima coleta: ${formatDateTime(item.data_ultima_coleta)}.`);
+    });
+    const uniqueObservations = [...new Set(observations)];
+    const uniqueCollected = [...new Set(collectedSummaries)];
+    const uniqueDates = [...new Set(lastCollectDates)];
+    const summary = level === 'inseguro_para_soma'
+        ? 'Atencao: dados inseguros para soma'
+        : 'Atencao: dados parciais';
+    const detail = uniqueObservations[0]
+        || uniqueCollected[0]
+        || 'Os valores exibidos representam apenas os dados oficiais coletados ate o momento.';
+    const dateLine = uniqueDates[0] || 'Ultima coleta: nao informada.';
+    warning.hidden = false;
+    warning.className = `quality-warning quality-${level}`;
+    warning.innerHTML = `
+        <strong>${escapeHtml(summary)}</strong>
+        <p>${escapeHtml(`${dateLine} ${detail}`)}</p>
+    `;
 }
 
 function normalizeDocuments(payload) {
@@ -176,16 +290,27 @@ function renderCamaraFinancialHealth(health) {
 }
 
 function renderFinancialSummary(revenues, expenses) {
-    const revenueSummary = calculateRevenueSummary(revenues?.registros || []);
+    const revenueSummary = calculateRevenueSummary(revenues);
+    const revenueMeta = revenues?.metadados || {};
+    const expenseMeta = expenses?.metadados || {};
+    const reliability = worstReliabilityLevel([
+        revenueMeta.nivel_confiabilidade,
+        expenseMeta.nivel_confiabilidade,
+    ]);
     const expenseRows = Array.isArray(expenses?.secretarias) ? expenses.secretarias : [];
     financeState.expenseRows = expenseRows;
     financeState.expanded = false;
 
     const totals = calculateExpenseTotals(expenseRows);
-    const balance = revenueSummary.collected === null || totals.paid === null
+    const canCompareBalance = Boolean(
+        revenueSummary.podeChamarTotal
+        && expenseMeta.nivel_confiabilidade === 'consolidado'
+        && revenueMeta.nivel_confiabilidade === 'consolidado'
+    );
+    const balance = !canCompareBalance || revenueSummary.collected === null || totals.paid === null
         ? null
         : revenueSummary.collected - totals.paid;
-    const financialHealth = classifyFinancialHealth(revenueSummary.collected, totals.paid);
+    const financialHealth = classifyFinancialHealth(revenueSummary.collected, totals.paid, 'arrecadação coletada', reliability);
 
     getElement('finance-revenue').textContent = formatMoney(revenueSummary.collected);
     getElement('finance-paid').textContent = formatMoney(totals.paid);
@@ -193,15 +318,14 @@ function renderFinancialSummary(revenues, expenses) {
     getElement('finance-committed').textContent = formatMoney(totals.committed);
     getElement('finance-liquidated').textContent = formatMoney(totals.liquidated);
 
-    getElement('finance-revenue-note').textContent = revenueSummary.usesTopLevel
-        ? 'Rubricas de topo coletadas'
-        : 'Soma dos registros coletados';
+    getElement('finance-revenue-note').textContent = revenueSummary.note;
     getElement('finance-expense-note').textContent = `${expenseRows.length} secretaria${expenseRows.length === 1 ? '' : 's'} com despesa`;
     getElement('finance-balance-note').textContent = balance === null
-        ? 'Aguardando dados oficiais'
-        : 'Arrecadado menos gasto pago';
+        ? 'Sem base suficiente para cálculo'
+        : 'Diferença entre arrecadação e gasto pago coletados';
     
     renderFinancialHealth(financialHealth);
+    renderQualityWarning('finance-quality-warning', [revenueMeta, expenseMeta]);
     renderChartsPrefeitura(revenueSummary, totals, expenseRows);
     renderFinanceRanking();
 }
@@ -212,9 +336,16 @@ function renderCamaraFinancialSummary(summary) {
     const liquidated = numberOrNull(summary?.despesa?.total_liquidado);
     const committed = numberOrNull(summary?.despesa?.total_empenhado);
     const budget = numberOrNull(summary?.despesa?.dotacao);
-    const balance = revenue === null || paid === null ? null : revenue - paid;
     const actionRows = Array.isArray(summary?.acoes) ? summary.acoes : [];
-    const financialHealth = classifyFinancialHealth(revenue, paid, 'receita realizada coletada');
+    const camaraMeta = summary?.metadados || {};
+    const canCompareBalance = camaraMeta.nivel_confiabilidade === 'consolidado';
+    const balance = !canCompareBalance || revenue === null || paid === null ? null : revenue - paid;
+    const financialHealth = classifyFinancialHealth(
+        revenue,
+        paid,
+        'receita coletada',
+        camaraMeta.nivel_confiabilidade || 'parcial',
+    );
 
     camaraFinanceState.actionRows = actionRows;
     camaraFinanceState.expanded = false;
@@ -231,24 +362,46 @@ function renderCamaraFinancialSummary(summary) {
         ? '1 ação orçamentária'
         : `${actionRows.length} ações orçamentárias`;
     getElement('camara-finance-balance-note').textContent = balance === null
-        ? 'Aguardando dados oficiais'
-        : 'Receita realizada menos gasto pago';
+        ? 'Sem base suficiente para cálculo'
+        : 'Diferença entre receita e gasto pago coletados';
 
     renderCamaraFinancialHealth(financialHealth);
+    renderQualityWarning('camara-finance-quality-warning', camaraMeta);
     renderChartsCamara(actionRows, summary);
     renderCamaraFinanceRanking();
 }
 
-function calculateRevenueSummary(rows) {
-    const topLevelRows = rows.filter((row) => /^\d0{14}$/.test(String(row.classificacao || '')));
-    const usableRows = topLevelRows.length ? topLevelRows : rows;
-    const collectedValues = usableRows
-        .map((row) => Number(row.valor_arrecadado))
-        .filter((value) => Number.isFinite(value));
+function calculateRevenueSummary(payload) {
+    const meta = payload?.metadados || {};
+    const agregacao = payload?.agregacao_receita || {};
+    const totalArrecadado = numberOrNull(payload?.total_arrecadado);
+    const valorColetado = numberOrNull(payload?.valor_arrecadado_coletado ?? payload?.total_arrecadado);
+    const podeChamarTotal = Boolean(
+        agregacao?.soma_segura
+        && meta?.nivel_confiabilidade === 'consolidado'
+        && meta?.coleta_completa === true
+    );
+
+    if (podeChamarTotal && totalArrecadado !== null) {
+        return {
+            collected: totalArrecadado,
+            podeChamarTotal: true,
+            note: 'Total consolidado com completude confirmada.',
+        };
+    }
+
+    if (valorColetado !== null) {
+        return {
+            collected: valorColetado,
+            podeChamarTotal: false,
+            note: 'Indicador parcial com base em dados oficiais coletados.',
+        };
+    }
 
     return {
-        collected: collectedValues.length ? collectedValues.reduce((sum, value) => sum + value, 0) : null,
-        usesTopLevel: topLevelRows.length > 0,
+        collected: null,
+        podeChamarTotal: false,
+        note: 'Sem base segura para total de arrecadação.',
     };
 }
 
@@ -267,51 +420,38 @@ function calculateExpenseTotals(rows) {
     };
 }
 
-function classifyFinancialHealth(collected, paid, baseLabel = 'arrecadação coletada') {
+function classifyFinancialHealth(collected, paid, baseLabel = 'arrecadacao coletada', reliabilityLevel = 'parcial') {
     if (!Number.isFinite(Number(collected)) || !Number.isFinite(Number(paid)) || Number(collected) <= 0) {
         return {
             level: 'unknown',
-            label: 'Sem dado',
-            note: 'Aguardando arrecadação e gastos oficiais.',
+            label: 'Sem leitura',
+            note: 'Sem base suficiente para indicador.',
         };
     }
 
     const ratio = (Number(paid) / Number(collected)) * 100;
     const ratioText = formatPercent(ratio);
 
-    if (ratio <= 70) {
+    if (reliabilityLevel !== 'consolidado') {
         return {
-            level: 'perfect',
-            label: 'Perfeito',
-            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
+            level: 'partial',
+            label: `Razao: ${ratioText}`,
+            note: `Leitura parcial. Pago representa ${ratioText} da ${baseLabel}.`,
         };
     }
-    if (ratio <= 85) {
-        return {
-            level: 'good',
-            label: 'Bom',
-            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
-        };
-    }
+
     if (ratio <= 100) {
         return {
-            level: 'regular',
-            label: 'Regular',
-            note: `Gasto pago usa ${ratioText} da ${baseLabel}.`,
-        };
-    }
-    if (ratio <= 115) {
-        return {
-            level: 'bad',
-            label: 'Ruim',
-            note: `Gasto pago supera a ${baseLabel} em ${ratioText}.`,
+            level: 'technical',
+            label: `Razao: ${ratioText}`,
+            note: `Indicador tecnico: pago dividido por ${baseLabel}.`,
         };
     }
 
     return {
-        level: 'critical',
-        label: 'Péssimo',
-        note: `Gasto pago está muito acima da ${baseLabel}: ${ratioText}.`,
+        level: 'warning',
+        label: `Razao: ${ratioText}`,
+        note: `Indicador tecnico acima de 100%: pago supera ${baseLabel}.`,
     };
 }
 
@@ -319,11 +459,9 @@ function renderHealthCard(health, ids) {
     const card = getElement(ids.card);
     card.classList.remove(
         'finance-health-unknown',
-        'finance-health-perfect',
-        'finance-health-good',
-        'finance-health-regular',
-        'finance-health-bad',
-        'finance-health-critical',
+        'finance-health-technical',
+        'finance-health-warning',
+        'finance-health-partial',
     );
     card.classList.add(`finance-health-${health.level}`);
     getElement(ids.status).textContent = health.label;
@@ -549,6 +687,7 @@ function renderFinancialError() {
     getElement('finance-revenue-note').textContent = 'Não foi possível carregar';
     getElement('finance-expense-note').textContent = 'Não foi possível carregar';
     getElement('finance-balance-note').textContent = 'Verifique a API';
+    renderQualityWarning('finance-quality-warning', []);
     getElement('finance-ranking-list').innerHTML = '<p>Não foi possível carregar os gastos por secretaria.</p>';
 }
 
@@ -567,6 +706,7 @@ function renderCamaraFinancialError() {
     getElement('camara-finance-revenue-note').textContent = 'Não foi possível carregar';
     getElement('camara-finance-expense-note').textContent = 'Não foi possível carregar';
     getElement('camara-finance-balance-note').textContent = 'Verifique a API';
+    renderQualityWarning('camara-finance-quality-warning', []);
     getElement('camara-finance-ranking-list').innerHTML = '<p>Não foi possível carregar os gastos da Câmara.</p>';
 }
 
@@ -834,6 +974,11 @@ function renderAskResult(payload) {
     const answer = payload?.resposta ?? payload;
     const approximate = Boolean(payload?.baseado_em_aproximacao_textual || answer?.baseado_em_aproximacao_textual);
 
+    if (isServidoresAnswer(payload, answer)) {
+        result.innerHTML = renderServidoresAnswer(payload, answer, approximate);
+        return;
+    }
+
     if (isSpendingAnswer(answer)) {
         result.innerHTML = renderSpendingAnswer(payload, answer, approximate);
         return;
@@ -865,6 +1010,14 @@ function renderAskResult(payload) {
     `;
 }
 
+function isServidoresAnswer(payload, answer) {
+    if (!answer || typeof answer !== 'object') return false;
+    return payload?.tipo === 'analytics_servidores_remuneracao'
+        || 'total_remuneracao_mes' in answer
+        || 'total_remuneracao_bruta' in answer
+        || 'total_salario_base' in answer;
+}
+
 function isSpendingAnswer(answer) {
     return Boolean(answer && typeof answer === 'object' && (
         'total_pago' in answer
@@ -872,6 +1025,84 @@ function isSpendingAnswer(answer) {
         || 'total_empenhado' in answer
         || Array.isArray(answer.registros)
     ));
+}
+
+function renderServidoresAnswer(payload, answer, approximate) {
+    const totalMes = numberOrNull(answer.total_remuneracao_mes);
+    const totalBruta = numberOrNull(answer.total_remuneracao_bruta);
+    const totalBase = numberOrNull(answer.total_salario_base);
+    const servidores = Number(answer.servidores || 0);
+    const secretarias = Array.isArray(answer.secretarias) ? answer.secretarias.slice(0, 5) : [];
+    const documents = uniqueDocuments(answer.documentos || []).slice(0, 5);
+    const periodo = [
+        answer.mes ? `mês ${String(answer.mes).padStart(2, '0')}` : null,
+        answer.ano || null,
+    ].filter(Boolean).join('/');
+    const periodoLabel = periodo ? `Período consultado: ${periodo}` : 'Período consultado: todos os dados coletados';
+    const summary = totalMes && totalMes > 0
+        ? 'Encontrei total estruturado de gasto com servidores.'
+        : (documents.length || secretarias.length)
+            ? 'Encontrei dados oficiais de remuneração, mas sem total consolidado para esta pergunta.'
+            : 'Não encontrei dados oficiais de remuneração para essa consulta.';
+
+    return `
+        <div class="ask-answer">
+            <div class="ask-answer-header">
+                <span>${escapeHtml(formatAskType(payload?.tipo))}</span>
+                ${approximate ? '<b>Relação provável</b>' : ''}
+            </div>
+            <h3>${escapeHtml(summary)}</h3>
+            <div class="ask-total-grid">
+                <div>
+                    <span>Total remuneração (mês)</span>
+                    <strong>${escapeHtml(formatMoney(totalMes))}</strong>
+                </div>
+                <div>
+                    <span>Total remuneração bruta</span>
+                    <strong>${escapeHtml(formatMoney(totalBruta))}</strong>
+                </div>
+                <div>
+                    <span>Total salário base</span>
+                    <strong>${escapeHtml(formatMoney(totalBase))}</strong>
+                </div>
+                <div>
+                    <span>Registros analisados</span>
+                    <strong>${escapeHtml(String(servidores || 0))}</strong>
+                </div>
+            </div>
+            <p class="ask-note">${escapeHtml(periodoLabel)}</p>
+            ${secretarias.length ? `
+                <div class="ask-section">
+                    <span class="ask-section-title">Top secretarias por remuneração</span>
+                    <div class="ask-record-list">
+                        ${secretarias.map(renderServidorSecretariaRecord).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            ${documents.length ? renderAskDocuments(documents) : ''}
+            ${answer.observacao ? `<p class="ask-observation">${escapeHtml(answer.observacao)}</p>` : ''}
+        </div>
+    `;
+}
+
+function renderServidorSecretariaRecord(record) {
+    const hasLink = Boolean(record.url_origem);
+    return `
+        <article class="ask-record">
+            <strong>${escapeHtml(record.secretaria || 'Secretaria não informada')}</strong>
+            <div class="ask-record-meta">
+                <span>Servidores: ${escapeHtml(String(record.servidores || 0))}</span>
+                <span>Remuneração mês: ${escapeHtml(formatMoney(record.total_remuneracao_mes))}</span>
+            </div>
+            <div class="ask-money-row">
+                <span>Bruta: <b>${escapeHtml(formatMoney(record.total_remuneracao_bruta))}</b></span>
+                <span>Salário base: <b>${escapeHtml(formatMoney(record.total_salario_base))}</b></span>
+            </div>
+            <a class="${hasLink ? '' : 'disabled'}" href="${escapeHtml(record.url_origem || '#')}" target="_blank" rel="noopener noreferrer">
+                Ver origem
+            </a>
+        </article>
+    `;
 }
 
 function renderSpendingAnswer(payload, answer, approximate) {
@@ -1116,6 +1347,7 @@ function formatAskType(type) {
         analytics_gastos_termo: 'Gastos por assunto',
         analytics_gastos_secretaria: 'Gastos por secretaria',
         analytics_gastos_secretarias: 'Gastos por secretarias',
+        analytics_servidores_remuneracao: 'Gasto com servidores',
         analytics_receitas: 'Arrecadação',
         analytics_vereador: 'Atuação Parlamentar',
         rag_vetorial_local: 'Busca nos documentos',
@@ -1196,10 +1428,17 @@ function bindEvents() {
     });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+function initApp() {
+    moveSummaryToDocumentsTab();
     bindEvents();
     switchTab(state.activeTab);
     loadFinancialSummary();
     loadCamaraFinancialSummary();
     loadDocuments();
-});
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initApp);
+} else {
+    initApp();
+}

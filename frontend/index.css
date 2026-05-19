@@ -491,6 +491,10 @@ h4 {
     margin-bottom: 18px;
 }
 
+.documents-tab .summary-strip {
+    margin: 0 0 16px;
+}
+
 .finance-panel {
     padding: 18px;
     margin: 0 0 18px;
@@ -535,6 +539,38 @@ h4 {
     gap: 12px;
 }
 
+.quality-warning {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(10, 17, 26, 0.72);
+}
+
+.quality-warning strong {
+    display: block;
+    font-size: 0.92rem;
+    color: var(--text);
+}
+
+.quality-warning p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 0.88rem;
+}
+
+.quality-warning.quality-consolidado {
+    border-color: rgba(68, 215, 168, 0.35);
+}
+
+.quality-warning.quality-parcial {
+    border-color: rgba(255, 196, 93, 0.45);
+}
+
+.quality-warning.quality-inseguro_para_soma {
+    border-color: rgba(255, 119, 112, 0.45);
+}
+
 .finance-card {
     min-height: 154px;
     padding: 18px;
@@ -558,41 +594,30 @@ h4 {
     background: linear-gradient(180deg, rgba(124, 194, 255, 0.1), rgba(22, 36, 53, 0.88));
 }
 
-.finance-health-perfect {
+.finance-health-technical {
     border-color: rgba(68, 215, 168, 0.42);
     background: linear-gradient(180deg, rgba(68, 215, 168, 0.18), rgba(22, 36, 53, 0.9));
 }
 
-.finance-health-good {
-    border-color: rgba(124, 194, 255, 0.42);
-    background: linear-gradient(180deg, rgba(77, 163, 255, 0.16), rgba(22, 36, 53, 0.9));
-}
-
-.finance-health-regular {
+.finance-health-partial {
     border-color: rgba(255, 196, 93, 0.42);
     background: linear-gradient(180deg, rgba(255, 196, 93, 0.15), rgba(22, 36, 53, 0.9));
 }
 
-.finance-health-bad,
-.finance-health-critical {
+.finance-health-warning {
     border-color: rgba(255, 119, 112, 0.44);
     background: linear-gradient(180deg, rgba(255, 119, 112, 0.16), rgba(22, 36, 53, 0.9));
 }
 
-.finance-health-perfect .finance-health-status {
+.finance-health-technical .finance-health-status {
     color: var(--green);
 }
 
-.finance-health-good .finance-health-status {
-    color: var(--primary-strong);
-}
-
-.finance-health-regular .finance-health-status {
+.finance-health-partial .finance-health-status {
     color: var(--amber);
 }
 
-.finance-health-bad .finance-health-status,
-.finance-health-critical .finance-health-status {
+.finance-health-warning .finance-health-status {
     color: var(--danger);
 }
 

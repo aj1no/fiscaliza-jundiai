@@ -1,52 +1,56 @@
 # Fiscaliza Jundiai
 
-Painel publico para coletar, organizar, pesquisar e analisar dados oficiais de Jundiai/SP.
+*[Ler em Português](README.pt-br.md)*
 
-O projeto nasceu como coletor documental e evoluiu para um painel analitico simples, com busca textual, indicadores financeiros e rastreabilidade para as fontes oficiais.
+Public dashboard to collect, organize, search, and analyze official data from Jundiai/SP (Brazil).
 
-## Status do projeto
+The project started as a document collector and evolved into a simple analytical dashboard, with full-text search, financial indicators, and traceability to official sources.
 
-MVP funcional em Docker:
+> Disclaimer: This is an independent citizen-interest project, with no official institutional ties to the City Hall or City Council.
 
-- Frontend estatico servido por Nginx.
-- API FastAPI.
-- PostgreSQL para persistencia.
-- Redis + Celery para coletas e processamento em segundo plano.
-- Coleta real da Imprensa Oficial, Camara/SAPL e Portal da Transparencia.
-- Processamento de PDF, HTML, JSON e CSV.
-- Busca textual unificada.
-- Painel financeiro com arrecadacao, despesas pagas, empenhadas e liquidadas por secretaria.
+## Project Status
 
-## Fontes de dados
+Functional MVP running on Docker:
 
-| Fonte | Conteudo | Formatos |
+- Static frontend served by Nginx.
+- FastAPI backend.
+- PostgreSQL for persistence.
+- Redis + Celery for background collections and processing.
+- Real data collection from the Official Gazette (Imprensa Oficial), City Council (Câmara/SAPL), and Transparency Portal.
+- Processing of PDF, HTML, JSON, and CSV files.
+- Unified full-text search.
+- Financial dashboard with reliability metadata (consolidated, partial, inseguro_para_soma).
+
+## Data Sources
+
+| Source | Content | Formats |
 | --- | --- | --- |
-| Imprensa Oficial de Jundiai | Publicacoes oficiais, editais e atos administrativos | PDF |
-| Camara Municipal / SAPL | Resumos de sessoes plenarias | HTML |
-| Portal da Transparencia | Licitacoes, contratos, receitas e despesas por secretaria | JSON e CSV |
+| Official Gazette of Jundiai | Official publications, notices, and administrative acts | PDF |
+| City Council / SAPL | Summaries of plenary sessions | HTML |
+| Transparency Portal | Biddings, contracts, revenues, and expenses by department | JSON and CSV |
 
-Todas as telas mantem links para a origem oficial sempre que disponivel.
+All screens keep links to the official source whenever available.
 
-## Funcionalidades
+## Features
 
-- Coleta manual e agendada de documentos oficiais.
-- Deduplicacao por hash e chave composta.
-- Extracao de texto para busca em PDF, HTML, JSON e CSV.
-- Busca por titulo, fonte, tipo de documento e texto extraido.
-- Painel publico com filtros por fonte e tipo.
-- Paginacao de documentos por fonte.
-- Indicadores de transparencia:
-  - total arrecadado;
-  - total pago;
-  - saldo simples;
-  - total empenhado;
-  - total liquidado;
-  - ranking completo de gastos por secretaria.
-- Endpoints analiticos para perguntas sobre gastos, receitas, temas, bairros e vereadores.
+- Manual and scheduled collection of official documents.
+- Deduplication by hash and composite key, with updates to live financial data when content changes.
+- Text extraction for search in PDF, HTML, JSON, and CSV.
+- Search by title, source, document type, and extracted text.
+- Public dashboard with source and type filters.
+- Document pagination by source.
+- Transparency indicators:
+  - collected revenue value;
+  - collected paid expense value;
+  - observed financial execution;
+  - collected committed value;
+  - collected liquidated value;
+  - complete ranking of expenses by department.
+- Analytical endpoints for questions about expenses, revenues, themes, neighborhoods, and councilors.
 
-## Como rodar
+## How to run
 
-### 1. Criar o arquivo de ambiente
+### 1. Create the environment file
 
 PowerShell:
 
@@ -60,13 +64,13 @@ Bash:
 cp .env.example .env
 ```
 
-### 2. Subir os containers
+### 2. Start the containers
 
 ```bash
 docker compose up --build -d
 ```
 
-### 3. Verificar saude da API
+### 3. Check API health
 
 PowerShell:
 
@@ -80,35 +84,37 @@ Bash:
 curl http://localhost:8000/health
 ```
 
-### 4. Acessar
+### 4. Access
 
 - Frontend: http://localhost:8080
 - API: http://localhost:8000
 - Swagger: http://localhost:8000/docs
 
-## Coleta manual
+## Manual Collection
+
+Administrative endpoints require a token in the `X-Admin-Token` header.
 
 PowerShell:
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8000/collect/manual
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/collect/manual -Headers @{ "X-Admin-Token" = "YOUR_TOKEN" }
 ```
 
 Bash:
 
 ```bash
-curl -X POST http://localhost:8000/collect/manual
+curl -X POST http://localhost:8000/collect/manual -H "X-Admin-Token: YOUR_TOKEN"
 ```
 
-Depois acompanhe os logs:
+Then monitor the logs:
 
 ```bash
 docker compose logs -f worker
 ```
 
-## Endpoints uteis
+## Useful Endpoints
 
-### Documentos
+### Documents
 
 ```text
 GET /documents?fonte=portal_transparencia&limit=5
@@ -133,37 +139,65 @@ GET /ask?q=quanto%20foi%20gasto%20com%20saude
 GET /rag?q=contratos%20da%20cultura
 ```
 
-## Variaveis de ambiente
+Financial endpoints return quality metadata, for example:
 
-As principais configuracoes ficam em `.env.example`.
+```json
+{
+  "metadados": {
+    "coleta_completa": false,
+    "registros_encontrados": 150,
+    "limite_aplicado": 150,
+    "nivel_confiabilidade": "parcial"
+  }
+}
+```
 
-| Variavel | Uso |
+### Administration (token required)
+
+```text
+POST /collect/manual
+POST /analytics/process
+POST /rag/index
+GET /tasks/{task_id}
+```
+
+## Environment Variables
+
+Main configurations are in `.env.example`.
+
+| Variable | Usage |
 | --- | --- |
-| `POSTGRES_USER` | Usuario do PostgreSQL |
-| `POSTGRES_PASSWORD` | Senha local do PostgreSQL |
-| `POSTGRES_DB` | Banco usado pela aplicacao |
-| `DATABASE_URL` | URL SQLAlchemy usada pelo backend e worker |
-| `REDIS_URL` | Redis usado pela aplicacao |
-| `CELERY_BROKER_URL` | Broker do Celery |
-| `CELERY_RESULT_BACKEND` | Backend de resultados do Celery |
-| `PORTAL_TRANSPARENCIA_ANO` | Exercicio consultado no Portal da Transparencia |
-| `PORTAL_TRANSPARENCIA_LIMIT` | Limite de licitacoes por coleta |
-| `PORTAL_TRANSPARENCIA_PAGE_SIZE` | Tamanho fixo da pagina de licitacoes |
-| `PORTAL_TRANSPARENCIA_DESPESAS_SECRETARIA_LIMIT` | Limite de despesas por secretaria |
-| `PORTAL_TRANSPARENCIA_CONTRATOS_LIMIT` | Limite de contratos |
-| `PORTAL_TRANSPARENCIA_RECEITAS_LIMIT` | Limite de receitas |
+| `POSTGRES_USER` | PostgreSQL user |
+| `POSTGRES_PASSWORD` | PostgreSQL local password |
+| `POSTGRES_DB` | Database used by the application |
+| `DATABASE_URL` | SQLAlchemy URL used by backend and worker |
+| `REDIS_URL` | Redis used by the application |
+| `CELERY_BROKER_URL` | Celery Broker |
+| `CELERY_RESULT_BACKEND` | Celery Result Backend |
+| `ADMIN_TOKEN` | Access token for administrative endpoints |
+| `ADMIN_RATE_WINDOW_SECONDS` | Rate limit window (seconds) for admin endpoints |
+| `ADMIN_RATE_LIMIT_COLLECT` | Max `/collect/manual` calls per window and IP |
+| `ADMIN_RATE_LIMIT_ANALYTICS` | Max `/analytics/process` calls per window and IP |
+| `ADMIN_RATE_LIMIT_RAG` | Max `/rag/index` calls per window and IP |
+| `PORTAL_TRANSPARENCIA_ANO` | Fiscal year queried in the Transparency Portal |
+| `PORTAL_TRANSPARENCIA_LIMIT` | Bidding limit per collection |
+| `PORTAL_TRANSPARENCIA_PAGE_SIZE` | Fixed page size for biddings |
+| `PORTAL_TRANSPARENCIA_DESPESAS_SECRETARIA_LIMIT` | Expense limit per department |
+| `PORTAL_TRANSPARENCIA_CONTRATOS_LIMIT` | Contract limit |
+| `PORTAL_TRANSPARENCIA_RECEITAS_LIMIT` | Revenue limit |
+| `FINANCE_DATA_STALE_HOURS` | Window to alert stale collection on the dashboard and analytics |
 
-Nunca envie o arquivo `.env` para o GitHub. Use apenas `.env.example`.
+Never push the `.env` file to GitHub. Use only `.env.example`.
 
-## Estrutura do projeto
+## Project Structure
 
 ```text
 backend/
   app/
-    analytics/      # extracao de entidades e consultas analiticas
-    collectors/     # coletores das fontes oficiais
-    models/         # modelos SQLAlchemy
-    tasks/          # Celery worker, beat e processamento
+    analytics/      # entity extraction and analytical queries
+    collectors/     # official source collectors
+    models/         # SQLAlchemy models
+    tasks/          # Celery worker, beat and processing
 frontend/
   index.html
   index.css
@@ -175,7 +209,7 @@ docs/
 docker-compose.yml
 ```
 
-## Rotina de desenvolvimento
+## Development Routine
 
 ```bash
 docker compose ps
@@ -185,27 +219,28 @@ docker compose restart frontend
 docker compose down
 ```
 
-Para reiniciar do zero apagando volumes locais:
+To restart from scratch by deleting local volumes:
 
 ```bash
 docker compose down -v
 docker compose up --build -d
 ```
 
-Use `down -v` com cuidado, pois isso apaga os dados locais do PostgreSQL.
+Use `down -v` carefully, as this deletes local PostgreSQL data.
 
-## Cuidados e limites
+## Precautions and Limits
 
-- O sistema nao cria dados simulados.
-- Se uma coleta real falhar, o erro deve ser registrado em log.
-- Dados anonimizados ou mascarados pela fonte oficial devem ser preservados como vieram.
-- Os valores financeiros dependem dos endpoints publicos disponiveis no Portal da Transparencia.
-- O endpoint `/ask` faz interpretacao simples por regras e busca local; nao substitui auditoria formal.
+- The system does not create simulated data.
+- If a real collection fails, the error must be logged.
+- Anonymized or masked data by the official source must be preserved as received.
+- Financial values depend on the public endpoints available in the Transparency Portal.
+- If an active collection limit is set, values are treated as partial.
+- The `/ask` endpoint performs simple rule-based interpretation and local search; it does not replace formal auditing.
 
 ## Roadmap
 
-- Detalhamento analitico da Camara Municipal por vereador.
-- Melhorias na busca interpretativa.
-- Comparativos historicos por ano.
-- Exportacao de consultas em CSV.
-- Testes automatizados para coletores e endpoints criticos.
+- Analytical detailing of the City Council by councilor.
+- Improvements in interpretive search.
+- Historical comparisons by year.
+- Export queries to CSV.
+- Automated tests for critical collectors and endpoints.

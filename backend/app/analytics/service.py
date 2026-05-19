@@ -1,6 +1,8 @@
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 import logging
+import os
 
 import requests
 from sqlalchemy import func, or_
@@ -10,6 +12,8 @@ from app.analytics import llm_service
 from app.models import models
 
 logger = logging.getLogger(__name__)
+
+DATA_STALE_HOURS = max(1, int(os.getenv("FINANCE_DATA_STALE_HOURS", "24")))
 
 CAMARA_TRANSPARENCIA_BASE_URL = "https://web.cijun.sp.gov.br/camara/yc/v1"
 CAMARA_TRANSPARENCIA_SITE_URL = "https://transparencia.jundiai.sp.leg.br/"
@@ -80,6 +84,246 @@ def _to_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _sum_numeric(values):
+    total = 0.0
+    found = False
+    for value in values:
+        parsed = _to_float(value)
+        if parsed is None:
+            continue
+        total += parsed
+        found = True
+    return total if found else None
+
+
+def _row_timestamp(row):
+    doc = getattr(row, "fonte_documento", None)
+    return (
+        getattr(doc, "atualizado_em", None)
+        or getattr(doc, "data_coleta", None)
+        or getattr(doc, "criado_em", None)
+        or getattr(row, "criado_em", None)
+        or datetime.min
+    )
+
+
+def _dedupe_latest_rows(rows, key_fn):
+    latest_by_key = {}
+    for row in rows:
+        key = key_fn(row)
+        if key is None:
+            key = ("row", getattr(row, "id", id(row)))
+        stamp = _row_timestamp(row)
+        current = latest_by_key.get(key)
+        if current is None or stamp >= current[0]:
+            latest_by_key[key] = (stamp, row)
+    return [item[1] for item in latest_by_key.values()]
+
+
+def _is_top_level_revenue_classification(value):
+    if value is None:
+        return False
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) < 6:
+        return False
+    trailing_zeros = len(digits) - len(digits.rstrip("0"))
+    return trailing_zeros >= 6
+
+
+def _revenue_digits(value):
+    if value is None:
+        return ""
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _revenue_pattern_recognized(rows):
+    digits = [_revenue_digits(row.classificacao) for row in rows if _revenue_digits(row.classificacao)]
+    if not digits:
+        return {
+            "recognized": False,
+            "reason": "nenhuma classificacao numerica valida encontrada",
+            "dominant_length": None,
+            "coverage": 0.0,
+        }
+
+    length_counter = Counter(len(item) for item in digits)
+    dominant_length, dominant_count = length_counter.most_common(1)[0]
+    coverage = dominant_count / len(digits)
+    recognized_length = dominant_length in {8, 15}
+    recognized = coverage >= 0.9 and recognized_length
+    reason = None
+    if not recognized:
+        reason = (
+            f"padrao de classificacao nao reconhecido com seguranca "
+            f"(comprimento_dominante={dominant_length}, cobertura={coverage:.2f})"
+        )
+    return {
+        "recognized": recognized,
+        "reason": reason,
+        "dominant_length": dominant_length,
+        "coverage": coverage,
+    }
+
+
+def _parse_snapshot_observations(raw_observacoes):
+    if not raw_observacoes:
+        return []
+    try:
+        payload = json.loads(raw_observacoes)
+    except Exception:
+        return [str(raw_observacoes)]
+    if isinstance(payload, list):
+        return [str(item) for item in payload if str(item).strip()]
+    return [str(payload)]
+
+
+def _safe_json_load(raw_value, default):
+    if not raw_value:
+        return default
+    try:
+        return json.loads(raw_value)
+    except Exception:
+        return default
+
+
+def _latest_snapshot(db, category, ano=None):
+    query = db.query(models.ColetaSnapshot).filter(
+        models.ColetaSnapshot.fonte == "portal_transparencia",
+        models.ColetaSnapshot.categoria == category,
+    )
+    if ano is not None:
+        query = query.filter(models.ColetaSnapshot.ano == ano)
+    return query.order_by(models.ColetaSnapshot.criado_em.desc()).first()
+
+
+def _snapshot_metadata(
+    db,
+    *,
+    category,
+    ano=None,
+    default_level="parcial",
+    source_label="Portal da Transparencia de Jundiai",
+    fallback_observations=None,
+):
+    snapshot = _latest_snapshot(db, category, ano=ano)
+    now = datetime.utcnow()
+    observations = list(fallback_observations or [])
+    if snapshot:
+        observations.extend(_parse_snapshot_observations(snapshot.observacoes))
+        stale = snapshot.criado_em and (now - snapshot.criado_em) > timedelta(hours=DATA_STALE_HOURS)
+        if stale:
+            observations.append(
+                f"ultima coleta com mais de {DATA_STALE_HOURS} horas; consulte nova coleta para dados atualizados"
+            )
+        return {
+            "fonte": source_label,
+            "ano": snapshot.ano if snapshot.ano is not None else ano,
+            "data_ultima_coleta": snapshot.criado_em,
+            "coleta_completa": bool(snapshot.coleta_completa),
+            "registros_encontrados": snapshot.registros_encontrados or 0,
+            "registros_coletados": snapshot.registros_coletados or 0,
+            "registros_novos": getattr(snapshot, "registros_novos", 0) or 0,
+            "registros_atualizados": getattr(snapshot, "registros_atualizados", 0) or 0,
+            "limite_aplicado": snapshot.limite_aplicado,
+            "endpoint": snapshot.endpoint,
+            "parametros_consulta": _safe_json_load(snapshot.parametros, {}),
+            "status_code": snapshot.status_code,
+            "hash_conteudo": snapshot.hash_conteudo,
+            "nivel_confiabilidade": snapshot.nivel_confiabilidade or default_level,
+            "observacoes": observations,
+        }
+    return {
+        "fonte": source_label,
+        "ano": ano,
+        "data_ultima_coleta": None,
+        "coleta_completa": False,
+        "registros_encontrados": 0,
+        "registros_coletados": 0,
+        "registros_novos": 0,
+        "registros_atualizados": 0,
+        "limite_aplicado": None,
+        "endpoint": None,
+        "parametros_consulta": {},
+        "status_code": None,
+        "hash_conteudo": None,
+        "nivel_confiabilidade": default_level,
+        "observacoes": ["nao ha snapshot recente para esta categoria"] + observations,
+    }
+
+
+def _normalize_finance_metadata(metadata, *, default_level="parcial"):
+    base = dict(metadata or {})
+
+    observations = base.get("observacoes")
+    if isinstance(observations, list):
+        observations = [str(item).strip() for item in observations if str(item).strip()]
+    elif observations:
+        observations = [str(observations).strip()]
+    else:
+        observations = []
+
+    level = str(base.get("nivel_confiabilidade") or default_level).strip().lower()
+    if level not in {"consolidado", "parcial", "inseguro_para_soma"}:
+        level = default_level
+
+    coleta_completa = bool(base.get("coleta_completa"))
+    registros_encontrados = int(base.get("registros_encontrados") or 0)
+    registros_coletados = int(base.get("registros_coletados") or 0)
+    registros_novos = int(base.get("registros_novos") or 0)
+    registros_atualizados = int(base.get("registros_atualizados") or 0)
+    limite_aplicado = base.get("limite_aplicado")
+    status_code = base.get("status_code")
+
+    if isinstance(status_code, str) and status_code.isdigit():
+        status_code = int(status_code)
+    if status_code is not None:
+        try:
+            status_code = int(status_code)
+        except Exception:
+            status_code = None
+
+    if limite_aplicado is not None:
+        try:
+            limite_aplicado = int(limite_aplicado)
+        except Exception:
+            limite_aplicado = None
+
+    if level == "consolidado" and not coleta_completa:
+        level = "parcial"
+        observations.append("coleta sem confirmacao de completude; confiabilidade reduzida para parcial")
+
+    if limite_aplicado is not None and registros_encontrados >= limite_aplicado:
+        if level == "consolidado":
+            level = "parcial"
+        observations.append("limite de coleta aplicado; resultado pode estar parcial")
+
+    if status_code is not None and status_code >= 400:
+        level = "inseguro_para_soma"
+        observations.append("falha em endpoint de origem durante coleta/consulta")
+
+    if base.get("data_ultima_coleta") is None and level == "consolidado":
+        level = "parcial"
+        observations.append("sem data de ultima coleta para confirmar consolidacao")
+
+    return {
+        "fonte": base.get("fonte"),
+        "ano": base.get("ano"),
+        "data_ultima_coleta": base.get("data_ultima_coleta"),
+        "coleta_completa": coleta_completa,
+        "registros_encontrados": registros_encontrados,
+        "registros_coletados": registros_coletados,
+        "registros_novos": registros_novos,
+        "registros_atualizados": registros_atualizados,
+        "limite_aplicado": limite_aplicado,
+        "endpoint": base.get("endpoint"),
+        "parametros_consulta": base.get("parametros_consulta") or {},
+        "status_code": status_code,
+        "hash_conteudo": base.get("hash_conteudo"),
+        "nivel_confiabilidade": level,
+        "observacoes": observations,
+    }
 
 
 def _camara_get_json(path, params):
@@ -207,10 +451,15 @@ def gastos_secretaria(db, nome, ano=None):
         if normalized_query in normalize_text(item.secretaria)
         or any(part in normalize_text(item.secretaria) for part in normalized_query.split() if len(part) > 3)
     ]
-    resumo_secretaria = [
+    resumo_secretaria_raw = [
         item for item in despesas
         if item.fonte_documento and item.fonte_documento.tipo_documento == "despesa_secretaria"
     ]
+    resumo_secretaria = _dedupe_latest_rows(
+        resumo_secretaria_raw,
+        lambda item: (item.ano, normalize_text(item.secretaria or "")),
+    )
+    resumo_dedupe_removed = max(0, len(resumo_secretaria_raw) - len(resumo_secretaria))
     contratos = [
         item for item in despesas
         if item.fonte_documento and item.fonte_documento.tipo_documento == "contrato"
@@ -232,29 +481,74 @@ def gastos_secretaria(db, nome, ano=None):
         if ano:
             docs_query = docs_query.filter(models.DocumentoBruto.titulo.ilike(f"%{ano}%"))
         docs = docs_query.limit(50).all()
+        metadata = _snapshot_metadata(
+            db,
+            category="despesa_secretaria",
+            ano=ano,
+            default_level="inseguro_para_soma",
+            fallback_observations=[
+                "nao ha valores estruturados suficientes para consolidacao segura nesta consulta"
+            ],
+        )
+        metadata = _normalize_finance_metadata(metadata, default_level="inseguro_para_soma")
         return {
             "secretaria": nome,
             "ano": ano,
             "total_empenhado": None,
             "total_liquidado": None,
             "total_pago": None,
+            "valor_empenhado_coletado": None,
+            "valor_liquidado_coletado": None,
+            "valor_pago_coletado": None,
+            "totais_consolidados": False,
             "documentos": [_document_payload(doc) for doc in docs],
             "baseado_em_aproximacao_textual": True,
+            "metadados": metadata,
             "observacao": "Nao ha valores monetarios estruturados para esta consulta; foram retornados documentos oficiais relacionados quando encontrados.",
         }
 
     def total(field):
-        values = [getattr(d, field) for d in despesas_para_total if getattr(d, field) is not None]
-        return sum(values) if values else None
+        return _sum_numeric(getattr(d, field) for d in despesas_para_total)
 
     docs = [d.fonte_documento for d in despesas_para_total if d.fonte_documento]
+    metadata = _snapshot_metadata(
+        db,
+        category="despesa_secretaria",
+        ano=ano,
+        default_level="parcial",
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level="parcial")
+    if resumo_dedupe_removed:
+        metadata["observacoes"].append(
+            f"{resumo_dedupe_removed} registros repetidos por secretaria foram deduplicados usando o registro mais recente"
+        )
+    if not resumo_secretaria:
+        metadata["nivel_confiabilidade"] = "inseguro_para_soma"
+        metadata["observacoes"].append(
+            "resultado sem linha consolidada de despesa por secretaria; valores podem refletir amostra de contratos"
+        )
+
+    valor_empenhado = total("valor_empenhado")
+    valor_liquidado = total("valor_liquidado")
+    valor_pago = total("valor_pago")
+    totais_consolidados = metadata["nivel_confiabilidade"] == "consolidado"
+    if not totais_consolidados and (valor_empenhado is not None or valor_liquidado is not None or valor_pago is not None):
+        metadata["observacoes"].append(
+            "valores retornados como indicador coletado; nao interpretar como total consolidado"
+        )
+
     return {
         "secretaria": nome,
         "ano": ano,
-        "total_empenhado": total("valor_empenhado"),
-        "total_liquidado": total("valor_liquidado"),
-        "total_pago": total("valor_pago"),
+        "total_empenhado": valor_empenhado if totais_consolidados else None,
+        "total_liquidado": valor_liquidado if totais_consolidados else None,
+        "total_pago": valor_pago if totais_consolidados else None,
+        "valor_empenhado_coletado": valor_empenhado,
+        "valor_liquidado_coletado": valor_liquidado,
+        "valor_pago_coletado": valor_pago,
+        "totais_consolidados": totais_consolidados,
         "documentos": [_document_payload(doc) for doc in docs],
+        "metadados": metadata,
         "registros": [
             {
                 "id": d.id,
@@ -263,9 +557,9 @@ def gastos_secretaria(db, nome, ano=None):
                 "fornecedor": d.fornecedor,
                 "cnpj": d.cnpj,
                 "objeto": d.objeto,
-                "valor_empenhado": d.valor_empenhado,
-                "valor_liquidado": d.valor_liquidado,
-                "valor_pago": d.valor_pago,
+                "valor_empenhado": _to_float(d.valor_empenhado),
+                "valor_liquidado": _to_float(d.valor_liquidado),
+                "valor_pago": _to_float(d.valor_pago),
                 "url_origem": d.url_origem,
             }
             for d in despesas_para_total
@@ -277,8 +571,8 @@ def gastos_secretaria(db, nome, ano=None):
                 "secretaria": d.secretaria,
                 "fornecedor": d.fornecedor,
                 "objeto": d.objeto,
-                "valor_empenhado": d.valor_empenhado,
-                "valor_pago": d.valor_pago,
+                "valor_empenhado": _to_float(d.valor_empenhado),
+                "valor_pago": _to_float(d.valor_pago),
                 "url_origem": d.url_origem,
             }
             for d in contratos
@@ -336,18 +630,41 @@ def gastos_por_termo(db, termo, ano=None):
         ][:30]
 
     def total(field):
-        values = [getattr(item, field) for item in matches if getattr(item, field) is not None]
-        return sum(values) if values else None
+        return _sum_numeric(getattr(item, field) for item in matches)
 
     docs = [item.fonte_documento for item in matches if item.fonte_documento]
+    metadata = _snapshot_metadata(
+        db,
+        category="contrato",
+        ano=ano,
+        default_level="parcial",
+        fallback_observations=[
+            "consulta baseada em correspondencia textual entre termo e contratos/despesas coletados"
+        ],
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level="parcial")
+    if not matches:
+        metadata["nivel_confiabilidade"] = "inseguro_para_soma"
+    valor_empenhado = total("valor_empenhado")
+    valor_liquidado = total("valor_liquidado")
+    valor_pago = total("valor_pago")
+    metadata["observacoes"].append(
+        "resultado por termo representa amostra textual; valores monetarios exibidos como indicador coletado"
+    )
+
     return {
         "termo": termo,
         "ano": ano,
         "termos_busca": all_terms,
-        "total_empenhado": total("valor_empenhado"),
-        "total_liquidado": total("valor_liquidado"),
-        "total_pago": total("valor_pago"),
+        "total_empenhado": None,
+        "total_liquidado": None,
+        "total_pago": None,
+        "valor_empenhado_coletado": valor_empenhado,
+        "valor_liquidado_coletado": valor_liquidado,
+        "valor_pago_coletado": valor_pago,
+        "totais_consolidados": False,
         "documentos": [_document_payload(doc) for doc in docs],
+        "metadados": metadata,
         "registros": [
             {
                 "id": item.id,
@@ -355,9 +672,9 @@ def gastos_por_termo(db, termo, ano=None):
                 "secretaria": item.secretaria,
                 "fornecedor": item.fornecedor,
                 "objeto": item.objeto,
-                "valor_empenhado": item.valor_empenhado,
-                "valor_liquidado": item.valor_liquidado,
-                "valor_pago": item.valor_pago,
+                "valor_empenhado": _to_float(item.valor_empenhado),
+                "valor_liquidado": _to_float(item.valor_liquidado),
+                "valor_pago": _to_float(item.valor_pago),
                 "url_origem": item.url_origem,
             }
             for item in matches
@@ -378,23 +695,45 @@ def gastos_por_secretarias(db, ano=None):
     if ano:
         query = query.filter(models.Despesa.ano == ano)
 
-    rows = query.all()
+    raw_rows = query.all()
+    rows = _dedupe_latest_rows(
+        raw_rows,
+        lambda row: (row.ano, normalize_text(row.secretaria or "")),
+    )
+    dedupe_removed = max(0, len(raw_rows) - len(rows))
     result = [
         {
             "secretaria": row.secretaria,
             "ano": row.ano,
-            "total_empenhado": row.valor_empenhado,
-            "total_liquidado": row.valor_liquidado,
-            "total_pago": row.valor_pago,
+            "total_empenhado": _to_float(row.valor_empenhado),
+            "total_liquidado": _to_float(row.valor_liquidado),
+            "total_pago": _to_float(row.valor_pago),
             "url_origem": row.url_origem,
             "documento_id": row.fonte_documento_id,
         }
         for row in rows
     ]
     result.sort(key=lambda item: item.get("total_pago") or item.get("total_empenhado") or 0, reverse=True)
+    metadata = _snapshot_metadata(
+        db,
+        category="despesa_secretaria",
+        ano=ano,
+        default_level="parcial",
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level="parcial")
+    if dedupe_removed:
+        metadata["observacoes"].append(
+            f"{dedupe_removed} registros repetidos por secretaria foram deduplicados usando o registro mais recente"
+        )
+    if metadata["limite_aplicado"] is not None and int(metadata["registros_encontrados"] or 0) >= int(metadata["limite_aplicado"]):
+        metadata["nivel_confiabilidade"] = "parcial"
+        metadata["observacoes"].append(
+            "limite de coleta aplicado para despesas por secretaria; nao tratar como total consolidado anual"
+        )
     return {
         "ano": ano,
         "secretarias": result,
+        "metadados": metadata,
         "observacao": "Totais por secretaria vindos do endpoint oficial de despesa por classificacao orcamentaria.",
     }
 
@@ -404,7 +743,16 @@ def receitas_analytics(db, ano=None, termo=None, limit=100):
     if ano:
         query = query.filter(models.Receita.ano == ano)
 
-    rows = query.limit(2000).all()
+    raw_rows = query.limit(5000).all()
+    rows = _dedupe_latest_rows(
+        raw_rows,
+        lambda row: (
+            row.ano,
+            _revenue_digits(row.classificacao) or normalize_text(row.classificacao or ""),
+            normalize_text(row.descricao or ""),
+        ),
+    )
+    dedupe_removed = max(0, len(raw_rows) - len(rows))
     if termo:
         normalized = normalize_text(termo)
         rows = [
@@ -412,29 +760,120 @@ def receitas_analytics(db, ano=None, termo=None, limit=100):
             if normalized in normalize_text(row.descricao)
             or normalized in normalize_text(row.classificacao)
         ]
-    rows = rows[:limit]
+    visible_rows = rows[:limit]
 
-    total_arrecadado = sum(row.valor_arrecadado for row in rows if row.valor_arrecadado is not None)
-    total_orcado = sum(row.valor_orcado for row in rows if row.valor_orcado is not None)
+    total_row = next(
+        (
+            row for row in rows
+            if "total geral" in normalize_text(row.descricao)
+        ),
+        None,
+    )
+    top_level_rows = [row for row in rows if _is_top_level_revenue_classification(row.classificacao)]
+    pattern = _revenue_pattern_recognized(rows)
+
+    indicador_arrecadado = None
+    indicador_orcado = None
+    total_arrecadado = None
+    total_orcado = None
+    confidence = "inseguro_para_soma"
+    observations = []
+    metodo_agregacao = "bloqueado"
+    if dedupe_removed:
+        observations.append(
+            f"{dedupe_removed} registros repetidos de receita foram deduplicados usando o registro mais recente"
+        )
+
+    if termo:
+        indicador_arrecadado = _sum_numeric(row.valor_arrecadado for row in rows)
+        indicador_orcado = _sum_numeric(row.valor_orcado for row in rows)
+        confidence = "parcial"
+        metodo_agregacao = "filtro_textual"
+        observations.append("consulta filtrada por termo; resultado representa somente registros relacionados")
+    elif not pattern["recognized"]:
+        confidence = "inseguro_para_soma"
+        metodo_agregacao = "padrao_nao_reconhecido"
+        observations.append(
+            pattern["reason"] or "classificacao orcamentaria sem padrao reconhecido; soma bloqueada por seguranca"
+        )
+    elif total_row:
+        indicador_arrecadado = _to_float(total_row.valor_arrecadado)
+        indicador_orcado = _to_float(total_row.valor_orcado)
+        total_arrecadado = indicador_arrecadado
+        total_orcado = indicador_orcado
+        confidence = "consolidado"
+        metodo_agregacao = "linha_total_geral"
+        observations.append("total baseado em linha identificada como Total Geral no endpoint oficial")
+    else:
+        confidence = "inseguro_para_soma"
+        metodo_agregacao = "hierarquia_indefinida"
+        observations.append(
+            "estrutura hierarquica impede consolidacao segura sem linha de Total Geral oficial; soma bloqueada"
+        )
+
+    metadata = _snapshot_metadata(
+        db,
+        category="receita_classificacao",
+        ano=ano,
+        default_level=confidence,
+        fallback_observations=observations,
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level=confidence)
+    limit_hit = (
+        metadata["limite_aplicado"] is not None
+        and int(metadata["registros_encontrados"] or 0) >= int(metadata["limite_aplicado"])
+    )
+    if limit_hit:
+        if metadata["nivel_confiabilidade"] == "consolidado":
+            metadata["nivel_confiabilidade"] = "parcial"
+        metadata["observacoes"].append("limite de coleta ativo para receitas; nao considerar como consolidado anual")
+    elif metadata["nivel_confiabilidade"] != "parcial":
+        metadata["nivel_confiabilidade"] = confidence
+
+    can_call_total = (
+        not termo
+        and pattern["recognized"]
+        and metadata["coleta_completa"] is True
+        and not limit_hit
+        and metodo_agregacao == "linha_total_geral"
+        and metadata["nivel_confiabilidade"] == "consolidado"
+    )
+    if not can_call_total and (indicador_arrecadado is not None or indicador_orcado is not None):
+        metadata["observacoes"].append(
+            "valores monetarios retornados como indicador coletado; nao interpretar como total consolidado"
+        )
+        total_arrecadado = None
+        total_orcado = None
+
     return {
         "ano": ano,
         "termo": termo,
         "total_orcado": total_orcado if rows else None,
         "total_arrecadado": total_arrecadado if rows else None,
+        "valor_orcado_coletado": indicador_orcado if rows else None,
+        "valor_arrecadado_coletado": indicador_arrecadado if rows else None,
+        "agregacao_receita": {
+            "metodo": metodo_agregacao,
+            "padrao_classificacao_reconhecido": pattern["recognized"],
+            "comprimento_classificacao_dominante": pattern["dominant_length"],
+            "cobertura_padrao": pattern["coverage"],
+            "soma_segura": can_call_total,
+        },
+        "metadados": metadata,
         "registros": [
             {
                 "id": row.id,
                 "ano": row.ano,
                 "classificacao": row.classificacao,
                 "descricao": row.descricao,
-                "valor_orcado": row.valor_orcado,
-                "valor_arrecadado": row.valor_arrecadado,
-                "percentual": row.percentual,
+                "valor_orcado": _to_float(row.valor_orcado),
+                "valor_arrecadado": _to_float(row.valor_arrecadado),
+                "percentual": _to_float(row.percentual),
                 "url_origem": row.url_origem,
             }
-            for row in rows
+            for row in visible_rows
         ],
-        "observacao": "Arrecadacao baseada no endpoint publico de receita por classificacao orcamentaria.",
+        "observacao": "Receitas baseadas em endpoint publico de classificacao orcamentaria, com metadado de confiabilidade.",
     }
 
 
@@ -447,18 +886,17 @@ def servidores_remuneracao(db, ano=None, mes=None, secretaria=None, limit=50):
         query = query.filter(models.ServidorRemuneracao.mes == mes)
     if secretaria:
         normalized_secretaria = normalize_text(secretaria)
-        candidates = query.limit(20000).all()
+        candidates = query.all()
         rows = [
             row for row in candidates
             if normalized_secretaria in normalize_text(row.secretaria)
             or any(part in normalize_text(row.secretaria) for part in _meaningful_parts(normalized_secretaria))
         ]
     else:
-        rows = query.limit(20000).all()
+        rows = query.all()
 
     def total(field):
-        values = [getattr(row, field) for row in rows if getattr(row, field) is not None]
-        return sum(values) if values else None
+        return _sum_numeric(getattr(row, field) for row in rows)
 
     by_secretaria = {}
     for row in rows:
@@ -471,22 +909,30 @@ def servidores_remuneracao(db, ano=None, mes=None, secretaria=None, limit=50):
             "total_salario_base": 0.0,
         })
         bucket["servidores"] += 1
-        bucket["total_remuneracao_mes"] += row.valor_total_mes or 0
-        bucket["total_remuneracao_bruta"] += row.valor_total_venc or 0
-        bucket["total_salario_base"] += row.valor_salario_base or 0
+        bucket["total_remuneracao_mes"] += _to_float(row.valor_total_mes) or 0.0
+        bucket["total_remuneracao_bruta"] += _to_float(row.valor_total_venc) or 0.0
+        bucket["total_salario_base"] += _to_float(row.valor_salario_base) or 0.0
 
     secretarias = sorted(
         by_secretaria.values(),
         key=lambda item: item["total_remuneracao_mes"],
         reverse=True,
     )
-    registros = sorted(rows, key=lambda row: row.valor_total_mes or 0, reverse=True)[:limit]
+    registros = sorted(rows, key=lambda row: _to_float(row.valor_total_mes) or 0, reverse=True)[:limit]
     documentos = []
     seen_docs = set()
     for row in rows:
         if row.fonte_documento and row.fonte_documento.id not in seen_docs:
             documentos.append(_document_payload(row.fonte_documento))
             seen_docs.add(row.fonte_documento.id)
+
+    metadata = _snapshot_metadata(
+        db,
+        category="remuneracao_servidores",
+        ano=ano,
+        default_level="parcial",
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level="parcial")
 
     return {
         "ano": ano,
@@ -497,6 +943,7 @@ def servidores_remuneracao(db, ano=None, mes=None, secretaria=None, limit=50):
         "total_remuneracao_mes": total("valor_total_mes"),
         "total_salario_base": total("valor_salario_base"),
         "secretarias": secretarias,
+        "metadados": metadata,
         "documentos": documentos,
         "registros": [
             {
@@ -509,9 +956,9 @@ def servidores_remuneracao(db, ano=None, mes=None, secretaria=None, limit=50):
                 "cargo": row.cargo,
                 "provimento": row.provimento,
                 "carga_horaria": row.carga_horaria,
-                "valor_total_venc": row.valor_total_venc,
-                "valor_total_mes": row.valor_total_mes,
-                "valor_salario_base": row.valor_salario_base,
+                "valor_total_venc": _to_float(row.valor_total_venc),
+                "valor_total_mes": _to_float(row.valor_total_mes),
+                "valor_salario_base": _to_float(row.valor_salario_base),
                 "data_atualizacao": row.data_atualizacao,
                 "url_origem": row.url_origem,
             }
@@ -614,6 +1061,22 @@ def auditoria_remuneracao_mensal(db, ano, ate_mes=12):
             "variacao_liquido_mes_anterior": variacao,
         })
 
+    metadata = _snapshot_metadata(
+        db,
+        category="remuneracao_servidores",
+        ano=ano,
+        default_level="parcial",
+        fallback_observations=[
+            "auditoria mensal derivada dos dados estruturados de remuneracao coletados no banco"
+        ],
+    )
+    metadata = _normalize_finance_metadata(metadata, default_level="parcial")
+    if meses_faltantes:
+        metadata["nivel_confiabilidade"] = "parcial"
+        metadata["observacoes"].append(
+            f"meses_sem_coleta_no_intervalo={','.join(str(m) for m in meses_faltantes)}"
+        )
+
     return {
         "ano": ano,
         "ate_mes": ate_mes,
@@ -625,6 +1088,7 @@ def auditoria_remuneracao_mensal(db, ano, ate_mes=12):
         "total_liquido_periodo": acumulado_liquido if acumulado_liquido > 0 else None,
         "total_base_periodo": acumulado_base if acumulado_base > 0 else None,
         "aprovado_sem_alertas": len(inconsistencias) == 0,
+        "metadados": metadata,
         "observacao": (
             "Auditoria baseada em dados reais coletados no banco. "
             "Meses sem coleta entram como nao_coletado e devem ser preenchidos para auditoria anual completa."
@@ -731,6 +1195,42 @@ def camara_financeiro(ano=None):
             "percentual": None,
         }
 
+    # Os endpoints atuais da Camara nao expõem total oficial de paginas/itens para
+    # confirmacao formal de completude; por seguranca, tratamos como parcial.
+    camara_complete = False
+    camara_level = "parcial" if (despesa_total or receita_uso) else "inseguro_para_soma"
+    camara_observacoes = []
+    if erros:
+        camara_observacoes.append(f"falhas_em_endpoints={len(erros)}")
+    if not receita_total_row and receita_rows:
+        camara_observacoes.append("receita sem linha Total Geral; valor agregado a partir dos registros retornados")
+    camara_observacoes.append(
+        "completude nao confirmada formalmente pelos endpoints da Camara; valores exibidos como observados"
+    )
+
+    camara_metadata = _normalize_finance_metadata(
+        {
+            "fonte": "Portal da Transparencia da Camara Municipal de Jundiai",
+            "ano": ano,
+            "data_ultima_coleta": datetime.utcnow(),
+            "coleta_completa": camara_complete,
+            "registros_encontrados": len(despesa_total_rows) + len(despesa_acoes_rows) + len(receita_rows),
+            "registros_coletados": len(despesa_total_rows) + len(despesa_acoes_rows) + len(receita_rows),
+            "limite_aplicado": None,
+            "endpoint": CAMARA_TRANSPARENCIA_BASE_URL,
+            "parametros_consulta": {
+                "despesa_total": despesa_total_params,
+                "despesa_acoes": despesa_acoes_params,
+                "receita": receita_params,
+            },
+            "status_code": None if erros else 200,
+            "hash_conteudo": None,
+            "nivel_confiabilidade": camara_level,
+            "observacoes": camara_observacoes,
+        },
+        default_level="parcial",
+    )
+
     return {
         "ano": ano,
         "fonte": "camara_municipal",
@@ -786,6 +1286,7 @@ def camara_financeiro(ano=None):
                 "registros": len(receita_rows),
             },
         },
+        "metadados": camara_metadata,
         "erros": erros,
         "observacao": (
             "Resumo calculado a partir dos endpoints publicos de receitas e despesas por classificacao "
@@ -836,9 +1337,10 @@ def secretarias_frequentes(db, tipo_documento=None, limit=20):
 
 
 def _format_brl(value):
-    if value is None:
+    parsed = _to_float(value)
+    if parsed is None:
         return None
-    return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {parsed:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def _chunk_payload(scored_chunk):
@@ -1002,12 +1504,13 @@ def interpret_question(db, q):
             if secretaria.nome_normalizado in normalized or any(part in normalized for part in _meaningful_parts(secretaria.nome_normalizado)):
                 secretaria_nome = secretaria.nome
                 break
+        ano_consulta = _extract_year(normalized) or datetime.now().year
         return {
             "tipo": "analytics_servidores_remuneracao",
             "consulta": q,
             "resposta": servidores_remuneracao(
                 db,
-                ano=_extract_year(normalized),
+                ano=ano_consulta,
                 mes=_extract_month(normalized),
                 secretaria=secretaria_nome,
             ),

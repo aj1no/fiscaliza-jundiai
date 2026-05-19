@@ -41,6 +41,19 @@ class PortalTransparenciaCollector:
     MAX_REMUNERACAO_LIMIT = 20000
     DEFAULT_MAX_ANOS_COLETA = 10
     MAX_MAX_ANOS_COLETA = 15
+    DYNAMIC_FINANCIAL_TYPES = {
+        "despesa_secretaria",
+        "contrato",
+        "receita_classificacao",
+        "remuneracao_servidores",
+    }
+    REQUIRED_KEYS_BY_CATEGORY = {
+        "licitacao": ("licitacao", "exercicio"),
+        "despesa_secretaria": ("descricao", "empenhado", "liquidado", "pago"),
+        "contrato": ("numero_contrato", "ano_contrato"),
+        "receita_classificacao": ("rubrica_receita", "descricao"),
+        "remuneracao_servidores": ("nome", "secretaria", "valor_total_mes"),
+    }
 
     def __init__(self):
         os.makedirs(self.STORAGE_PATH, exist_ok=True)
@@ -52,6 +65,110 @@ class PortalTransparenciaCollector:
             ),
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
         })
+
+    def _json_dump(self, payload):
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _normalize_snapshot_observations(self, observations):
+        clean = []
+        for item in observations or []:
+            text = str(item or "").strip()
+            if text:
+                clean.append(text)
+        return clean
+
+    def _record_snapshot(
+        self,
+        db,
+        *,
+        categoria,
+        tipo_documento,
+        ano,
+        endpoint,
+        params,
+        status_code,
+        registros_encontrados,
+        registros_coletados,
+        registros_novos=0,
+        registros_atualizados=0,
+        limite_aplicado,
+        total_itens_informado=None,
+        hash_conteudo=None,
+        coleta_completa=False,
+        nivel_confiabilidade="parcial",
+        observacoes=None,
+    ):
+        snapshot = models.ColetaSnapshot(
+            fonte="portal_transparencia",
+            categoria=categoria,
+            tipo_documento=tipo_documento,
+            ano=ano,
+            endpoint=endpoint,
+            parametros=self._json_dump(params or {}),
+            status_code=status_code,
+            coleta_completa=bool(coleta_completa),
+            registros_encontrados=int(registros_encontrados or 0),
+            registros_coletados=int(registros_coletados or 0),
+            registros_novos=int(registros_novos or 0),
+            registros_atualizados=int(registros_atualizados or 0),
+            limite_aplicado=limite_aplicado,
+            total_itens_informado=total_itens_informado,
+            hash_conteudo=hash_conteudo,
+            nivel_confiabilidade=nivel_confiabilidade,
+            observacoes=self._json_dump(self._normalize_snapshot_observations(observacoes)),
+            criado_em=datetime.utcnow(),
+        )
+        db.add(snapshot)
+        db.commit()
+        return snapshot
+
+    def _is_dynamic_financial(self, tipo_documento):
+        return (tipo_documento or "") in self.DYNAMIC_FINANCIAL_TYPES
+
+    def _reset_document_artifacts(self, db, document_id):
+        processed_ids = [
+            item.id for item in db.query(models.DocumentoProcessado.id).filter(
+                models.DocumentoProcessado.documento_bruto_id == document_id
+            ).all()
+        ]
+        if processed_ids:
+            db.query(models.DocumentoChunk).filter(
+                models.DocumentoChunk.documento_processado_id.in_(processed_ids)
+            ).delete(synchronize_session=False)
+            db.query(models.EntidadeExtraida).filter(
+                models.EntidadeExtraida.documento_processado_id.in_(processed_ids)
+            ).delete(synchronize_session=False)
+            db.query(models.DocumentoEntidade).filter(
+                models.DocumentoEntidade.documento_id.in_(processed_ids)
+            ).delete(synchronize_session=False)
+            db.query(models.DocumentoProcessado).filter(
+                models.DocumentoProcessado.documento_bruto_id == document_id
+            ).delete(synchronize_session=False)
+
+        db.query(models.Despesa).filter(
+            models.Despesa.fonte_documento_id == document_id
+        ).delete(synchronize_session=False)
+        db.query(models.Receita).filter(
+            models.Receita.fonte_documento_id == document_id
+        ).delete(synchronize_session=False)
+        db.query(models.ServidorRemuneracao).filter(
+            models.ServidorRemuneracao.fonte_documento_id == document_id
+        ).delete(synchronize_session=False)
+
+    def _validate_records_shape(self, category, records):
+        if not isinstance(records, list):
+            raise ValueError(f"Formato inesperado para {category}: esperado array, recebido {type(records).__name__}")
+        if not records:
+            return
+        first = next((item for item in records if isinstance(item, dict)), None)
+        if first is None:
+            raise ValueError(f"Formato inesperado para {category}: itens nao sao objetos")
+        required = self.REQUIRED_KEYS_BY_CATEGORY.get(category, ())
+        missing = [field for field in required if field not in first]
+        if missing:
+            raise ValueError(
+                f"Formato inesperado para {category}: campos obrigatorios ausentes no retorno: {missing}"
+            )
 
     def _fetch(self, url, **kwargs):
         logger.info("Portal Transparencia acessando URL: %s", url)
@@ -327,18 +444,48 @@ class PortalTransparenciaCollector:
                 file.write(raw_bytes)
         return file_path
 
+    def _stable_publication_key(self, publication_date):
+        if publication_date is None:
+            return None
+        if isinstance(publication_date, datetime):
+            return publication_date.isoformat()
+        return str(publication_date)
+
+    def _dynamic_financial_hash(
+        self,
+        *,
+        tipo_documento,
+        public_url,
+        title,
+        publication_date,
+        endpoint,
+        params,
+        payload_bytes,
+    ):
+        """
+        Dados financeiros vivos podem ter mesmo payload bruto em consultas distintas.
+        O hash inclui chave natural + rastreabilidade para evitar colisao indevida
+        entre itens diferentes e manter deduplicacao estavel por item consultado.
+        """
+        payload_hash = hashlib.sha256(payload_bytes).hexdigest()
+        envelope = {
+            "fonte": "portal_transparencia",
+            "tipo_documento": tipo_documento,
+            "url_origem": public_url,
+            "titulo": (title or "")[:255],
+            "data_publicacao": self._stable_publication_key(publication_date),
+            "endpoint": endpoint,
+            "parametros_consulta": params or {},
+            "payload_hash": payload_hash,
+        }
+        return hashlib.sha256(self._json_dump(envelope).encode("utf-8")).hexdigest()
+
     def _duplicate_reason(self, db, content_hash, url, title, publication_date, tipo_documento="licitacao"):
         hash_duplicate = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.hash_arquivo == content_hash
         ).first()
         if hash_duplicate:
             return "hash"
-
-        url_duplicate = db.query(models.DocumentoBruto).filter(
-            models.DocumentoBruto.url_origem == url
-        ).first()
-        if url_duplicate:
-            return "chave_composta"
 
         query = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.fonte == "portal_transparencia",
@@ -352,7 +499,103 @@ class PortalTransparenciaCollector:
             query = query.filter(models.DocumentoBruto.data_publicacao == publication_date)
         if query.first() is not None:
             return "chave_composta"
+
+        # Para documentos estaticos (ex.: licitacao), URL repetida costuma representar o
+        # mesmo registro. Para dados financeiros vivos, a URL pode se repetir com conteudo
+        # atualizado; nesses casos a atualizacao e feita em _save_*_document.
+        if not self._is_dynamic_financial(tipo_documento):
+            url_duplicate = db.query(models.DocumentoBruto).filter(
+                models.DocumentoBruto.fonte == "portal_transparencia",
+                models.DocumentoBruto.tipo_documento == tipo_documento,
+                models.DocumentoBruto.url_origem == url,
+            ).first()
+            if url_duplicate:
+                return "chave_composta"
         return None
+
+    def _find_existing_dynamic_document(self, db, tipo_documento, public_url, title, publication_date):
+        query = db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.fonte == "portal_transparencia",
+            models.DocumentoBruto.tipo_documento == tipo_documento,
+            models.DocumentoBruto.url_origem == public_url,
+            models.DocumentoBruto.titulo == title[:255],
+        )
+        if publication_date is None:
+            query = query.filter(models.DocumentoBruto.data_publicacao.is_(None))
+        else:
+            query = query.filter(models.DocumentoBruto.data_publicacao == publication_date)
+        existing = query.first()
+        if existing:
+            return existing
+        return db.query(models.DocumentoBruto).filter(
+            models.DocumentoBruto.fonte == "portal_transparencia",
+            models.DocumentoBruto.tipo_documento == tipo_documento,
+            models.DocumentoBruto.url_origem == public_url,
+        ).first()
+
+    def _upsert_dynamic_document(
+        self,
+        db,
+        *,
+        tipo_documento,
+        title,
+        public_url,
+        publication_date,
+        content_hash,
+        file_path,
+        formato,
+        endpoint,
+        params,
+        status_code,
+    ):
+        existing = self._find_existing_dynamic_document(
+            db,
+            tipo_documento,
+            public_url,
+            title,
+            publication_date,
+        )
+        if not existing:
+            return None
+        if existing.hash_arquivo == content_hash:
+            # Mesmo conteudo: marca "visto novamente" para rastreabilidade
+            # sem forcar reprocessamento do documento.
+            existing.data_coleta = datetime.utcnow()
+            existing.atualizado_em = datetime.utcnow()
+            db.commit()
+            logger.info(
+                "[DUPLICADO] Portal Transparencia %s por hash estavel (last_seen atualizado): %s | endpoint=%s | params=%s | hash=%s",
+                tipo_documento,
+                title,
+                endpoint,
+                params,
+                content_hash,
+            )
+            return "hash"
+
+        self._reset_document_artifacts(db, existing.id)
+        existing.titulo = title[:255]
+        existing.url_origem = public_url
+        existing.data_publicacao = publication_date
+        existing.data_coleta = datetime.utcnow()
+        existing.formato = formato
+        existing.caminho_arquivo = file_path
+        existing.hash_arquivo = content_hash
+        existing.hash_texto = None
+        existing.status_processamento = "coletado"
+        existing.erro_processamento = None
+        existing.atualizado_em = datetime.utcnow()
+        db.commit()
+        logger.info(
+            "[ATUALIZADO] Portal Transparencia %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
+            tipo_documento,
+            title,
+            endpoint,
+            params,
+            status_code,
+            content_hash,
+        )
+        return "salvo"
 
     def _fetch_licitacoes_pages(self, config):
         fetched = []
@@ -365,7 +608,12 @@ class PortalTransparenciaCollector:
             params = self._licitacoes_params(config["ano"], page, per_page)
             response = self._fetch(self.LICITACOES_API_URL, params=params)
             data = response.json()
-            records = data.get("licitacoes", []) if isinstance(data, dict) else []
+            if not isinstance(data, dict):
+                raise ValueError("Resposta inesperada do endpoint de licitacoes: payload nao e objeto JSON")
+            records = data.get("licitacoes", [])
+            if records is None:
+                records = []
+            self._validate_records_shape("licitacao", records)
             total_items = data.get("total_itens", total_items) if isinstance(data, dict) else total_items
             requests_info.append({
                 "page": page,
@@ -411,7 +659,10 @@ class PortalTransparenciaCollector:
         }
         response = self._fetch(self.DESPESAS_CLASSIFICACAO_PAGE_URL, params=params)
         csv_text = self._decode_text(response.content)
+        if "<html" in csv_text.lower():
+            raise ValueError("Resposta HTML inesperada ao solicitar CSV de despesas por secretaria")
         rows = list(csv.DictReader(io.StringIO(csv_text), delimiter=";"))
+        self._validate_records_shape("despesa_secretaria", rows)
         return rows, params, response
 
     def _csv_row_bytes(self, row):
@@ -478,6 +729,9 @@ class PortalTransparenciaCollector:
     ):
         normalized_for_hash = dict(normalized)
         normalized_for_hash["hash_arquivo"] = None
+        # data_coleta varia a cada execucao e nao representa mudanca de conteudo.
+        # Ela fica nula no payload bruto de hash para manter deduplicacao estavel.
+        # A data real da coleta segue salva em documentos_brutos.data_coleta.
         normalized_for_hash["data_coleta"] = None
         raw_bytes = self._raw_payload_generic(
             category,
@@ -489,6 +743,24 @@ class PortalTransparenciaCollector:
             normalized_for_hash,
         )
         content_hash = hashlib.sha256(raw_bytes).hexdigest()
+        file_path = self._save_raw_file(content_hash, raw_bytes)
+
+        if self._is_dynamic_financial(tipo_documento):
+            upsert_result = self._upsert_dynamic_document(
+                db,
+                tipo_documento=tipo_documento,
+                title=title,
+                public_url=public_url,
+                publication_date=publication_date,
+                content_hash=content_hash,
+                file_path=file_path,
+                formato="json",
+                endpoint=endpoint,
+                params=params,
+                status_code=status_code,
+            )
+            if upsert_result:
+                return upsert_result
 
         duplicate_reason = self._duplicate_reason(
             db,
@@ -511,7 +783,6 @@ class PortalTransparenciaCollector:
             return duplicate_reason
 
         normalized["hash_arquivo"] = content_hash
-        file_path = self._save_raw_file(content_hash, raw_bytes)
         db.add(models.DocumentoBruto(
             fonte="portal_transparencia",
             tipo_documento=tipo_documento,
@@ -554,6 +825,34 @@ class PortalTransparenciaCollector:
     ):
         raw_bytes = self._csv_row_bytes(row)
         content_hash = hashlib.sha256(raw_bytes).hexdigest()
+        if self._is_dynamic_financial(tipo_documento):
+            content_hash = self._dynamic_financial_hash(
+                tipo_documento=tipo_documento,
+                public_url=public_url,
+                title=title,
+                publication_date=publication_date,
+                endpoint=endpoint,
+                params=params,
+                payload_bytes=raw_bytes,
+            )
+        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
+
+        if self._is_dynamic_financial(tipo_documento):
+            upsert_result = self._upsert_dynamic_document(
+                db,
+                tipo_documento=tipo_documento,
+                title=title,
+                public_url=public_url,
+                publication_date=publication_date,
+                content_hash=content_hash,
+                file_path=file_path,
+                formato="csv",
+                endpoint=endpoint,
+                params=params,
+                status_code=status_code,
+            )
+            if upsert_result:
+                return upsert_result
 
         duplicate_reason = self._duplicate_reason(
             db,
@@ -575,7 +874,6 @@ class PortalTransparenciaCollector:
             )
             return duplicate_reason
 
-        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
         db.add(models.DocumentoBruto(
             fonte="portal_transparencia",
             tipo_documento=tipo_documento,
@@ -616,6 +914,34 @@ class PortalTransparenciaCollector:
         publication_date=None,
     ):
         content_hash = hashlib.sha256(raw_bytes).hexdigest()
+        if self._is_dynamic_financial(tipo_documento):
+            content_hash = self._dynamic_financial_hash(
+                tipo_documento=tipo_documento,
+                public_url=public_url,
+                title=title,
+                publication_date=publication_date,
+                endpoint=endpoint,
+                params=params,
+                payload_bytes=raw_bytes,
+            )
+        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
+
+        if self._is_dynamic_financial(tipo_documento):
+            upsert_result = self._upsert_dynamic_document(
+                db,
+                tipo_documento=tipo_documento,
+                title=title,
+                public_url=public_url,
+                publication_date=publication_date,
+                content_hash=content_hash,
+                file_path=file_path,
+                formato="csv",
+                endpoint=endpoint,
+                params=params,
+                status_code=status_code,
+            )
+            if upsert_result:
+                return upsert_result
 
         hash_duplicate = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.hash_arquivo == content_hash
@@ -631,51 +957,6 @@ class PortalTransparenciaCollector:
                 content_hash,
             )
             return "hash"
-
-        url_duplicate = db.query(models.DocumentoBruto).filter(
-            models.DocumentoBruto.url_origem == public_url
-        ).first()
-        if url_duplicate:
-            file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
-            processed_ids = [
-                item.id for item in db.query(models.DocumentoProcessado.id).filter(
-                    models.DocumentoProcessado.documento_bruto_id == url_duplicate.id
-                ).all()
-            ]
-            if processed_ids:
-                db.query(models.DocumentoChunk).filter(
-                    models.DocumentoChunk.documento_processado_id.in_(processed_ids)
-                ).delete(synchronize_session=False)
-                db.query(models.EntidadeExtraida).filter(
-                    models.EntidadeExtraida.documento_processado_id.in_(processed_ids)
-                ).delete(synchronize_session=False)
-                db.query(models.DocumentoEntidade).filter(
-                    models.DocumentoEntidade.documento_id.in_(processed_ids)
-                ).delete(synchronize_session=False)
-                db.query(models.DocumentoProcessado).filter(
-                    models.DocumentoProcessado.documento_bruto_id == url_duplicate.id
-                ).delete(synchronize_session=False)
-            db.query(models.ServidorRemuneracao).filter(
-                models.ServidorRemuneracao.fonte_documento_id == url_duplicate.id
-            ).delete(synchronize_session=False)
-
-            url_duplicate.titulo = title[:255]
-            url_duplicate.caminho_arquivo = file_path
-            url_duplicate.hash_arquivo = content_hash
-            url_duplicate.status_processamento = "coletado"
-            url_duplicate.erro_processamento = None
-            url_duplicate.atualizado_em = datetime.utcnow()
-            db.commit()
-            logger.info(
-                "[ATUALIZADO] Portal Transparencia CSV %s: %s | endpoint=%s | params=%s | status_code=%s | hash=%s",
-                tipo_documento,
-                title,
-                endpoint,
-                params,
-                status_code,
-                content_hash,
-            )
-            return "salvo"
 
         query = db.query(models.DocumentoBruto).filter(
             models.DocumentoBruto.fonte == "portal_transparencia",
@@ -698,7 +979,6 @@ class PortalTransparenciaCollector:
             )
             return "chave_composta"
 
-        file_path = self._save_raw_file(content_hash, raw_bytes, extension="csv")
         db.add(models.DocumentoBruto(
             fonte="portal_transparencia",
             tipo_documento=tipo_documento,
@@ -795,7 +1075,17 @@ class PortalTransparenciaCollector:
         }
 
     def _collect_expense_summaries(self, db, config):
-        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        stats = {
+            "salvo": 0,
+            "hash": 0,
+            "chave_composta": 0,
+            "erro": 0,
+            "encontrado": 0,
+            "endpoint": None,
+            "params": None,
+            "status_code": None,
+            "limite_aplicado": config["despesas_secretaria_limit"],
+        }
         try:
             try:
                 records, params, response = self._fetch_expense_summary_csv(config)
@@ -821,8 +1111,12 @@ class PortalTransparenciaCollector:
                 response = self._fetch(self.DESPESAS_CLASSIFICACAO_API_URL, params=params)
                 data = response.json()
                 records = data.get("retorno", []) if isinstance(data, dict) else []
+                self._validate_records_shape("despesa_secretaria", records)
                 endpoint = self.DESPESAS_CLASSIFICACAO_API_URL
                 using_csv = False
+            stats["endpoint"] = endpoint
+            stats["params"] = params.copy()
+            stats["status_code"] = response.status_code
 
             stats["encontrado"] = len(records)
             for record in records[:config["despesas_secretaria_limit"]]:
@@ -868,7 +1162,17 @@ class PortalTransparenciaCollector:
         return stats
 
     def _collect_contracts(self, db, config):
-        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        stats = {
+            "salvo": 0,
+            "hash": 0,
+            "chave_composta": 0,
+            "erro": 0,
+            "encontrado": 0,
+            "endpoint": self.CONTRATOS_API_URL,
+            "params": None,
+            "status_code": None,
+            "limite_aplicado": config["contratos_limit"],
+        }
         params = {
             "tipo": "C",
             "ano": str(config["ano"]),
@@ -883,8 +1187,11 @@ class PortalTransparenciaCollector:
         }
         try:
             response = self._fetch(self.CONTRATOS_API_URL, params=params)
+            stats["params"] = params.copy()
+            stats["status_code"] = response.status_code
             data = response.json()
             records = data.get("contratos", []) if isinstance(data, dict) else []
+            self._validate_records_shape("contrato", records)
             stats["encontrado"] = len(records)
             for record in records[:config["contratos_limit"]]:
                 number = record.get("numero_contrato") or "sem-numero"
@@ -917,7 +1224,17 @@ class PortalTransparenciaCollector:
         return stats
 
     def _collect_revenues(self, db, config):
-        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        stats = {
+            "salvo": 0,
+            "hash": 0,
+            "chave_composta": 0,
+            "erro": 0,
+            "encontrado": 0,
+            "endpoint": self.RECEITAS_CLASSIFICACAO_API_URL,
+            "params": None,
+            "status_code": None,
+            "limite_aplicado": config["receitas_limit"],
+        }
         params = {
             "ano": str(config["ano"]),
             "mes_inicial": "1",
@@ -925,9 +1242,12 @@ class PortalTransparenciaCollector:
         }
         try:
             response = self._fetch(self.RECEITAS_CLASSIFICACAO_API_URL, params=params)
+            stats["params"] = params.copy()
+            stats["status_code"] = response.status_code
             records = response.json()
             if not isinstance(records, list):
                 records = []
+            self._validate_records_shape("receita_classificacao", records)
             stats["encontrado"] = len(records)
             for record in records[:config["receitas_limit"]]:
                 rubric = record.get("rubrica_receita") or "sem-rubrica"
@@ -958,9 +1278,22 @@ class PortalTransparenciaCollector:
         return stats
 
     def _collect_remuneration(self, db, config):
-        stats = {"salvo": 0, "hash": 0, "chave_composta": 0, "erro": 0, "encontrado": 0}
+        stats = {
+            "salvo": 0,
+            "hash": 0,
+            "chave_composta": 0,
+            "erro": 0,
+            "encontrado": 0,
+            "endpoint": self.REMUNERACAO_PAGE_URL,
+            "params": [],
+            "status_code": None,
+            "limite_aplicado": config["remuneracao_limit"],
+            "meses_consultados": 0,
+            "meses_com_limite": 0,
+        }
         mes_inicial, mes_final = self._remuneracao_month_window(config, config["ano"])
         for mes in range(mes_inicial, mes_final + 1):
+            stats["meses_consultados"] += 1
             params = {
                 "secretaria": "0",
                 "cargo": "0",
@@ -973,8 +1306,13 @@ class PortalTransparenciaCollector:
             }
             try:
                 response = self._fetch(self.REMUNERACAO_PAGE_URL, params=params)
+                stats["params"].append(params.copy())
+                stats["status_code"] = response.status_code
                 stable_csv, rows = self._stable_csv_bytes(response.content)
+                self._validate_records_shape("remuneracao_servidores", rows)
                 stats["encontrado"] += len(rows)
+                if len(rows) >= config["remuneracao_limit"]:
+                    stats["meses_com_limite"] += 1
                 if not rows:
                     logger.warning(
                         "Portal Transparencia remuneracao sem registros: url=%s status_code=%s params=%s",
@@ -1072,6 +1410,10 @@ class PortalTransparenciaCollector:
                 fetched_records, total_items, requests_info = self._fetch_licitacoes_pages(year_config)
                 total_licitacoes_found += len(fetched_records)
                 any_record_found = any_record_found or bool(fetched_records)
+                licit_saved = 0
+                licit_hash_dup = 0
+                licit_composite_dup = 0
+                licit_errors = 0
 
                 details.append(
                     f"categoria=licitacao; ano_consultado={year}; "
@@ -1116,8 +1458,10 @@ class PortalTransparenciaCollector:
                         if duplicate_reason:
                             if duplicate_reason == "hash":
                                 duplicate_hash_count += 1
+                                licit_hash_dup += 1
                             else:
                                 duplicate_composite_count += 1
+                                licit_composite_dup += 1
                             logger.info(
                                 "[DUPLICADO] Licitacao ja cadastrada por %s: %s | endpoint=%s | params=%s | hash=%s",
                                 duplicate_reason,
@@ -1145,6 +1489,7 @@ class PortalTransparenciaCollector:
                         ))
                         db.commit()
                         new_count += 1
+                        licit_saved += 1
                         logger.info(
                             "[SALVO] Licitacao salva: %s | endpoint=%s | params=%s | status_code=%s | hash=%s | arquivo=%s",
                             title,
@@ -1156,6 +1501,7 @@ class PortalTransparenciaCollector:
                         )
                     except Exception as record_error:
                         error_count += 1
+                        licit_errors += 1
                         db.rollback()
                         logger.error(
                             "Erro ao salvar registro de licitacao (ano=%s): %s\n%s",
@@ -1163,6 +1509,64 @@ class PortalTransparenciaCollector:
                             record_error,
                             traceback.format_exc(),
                         )
+
+                total_items_int = None
+                if total_items is not None:
+                    try:
+                        total_items_int = int(total_items)
+                    except (TypeError, ValueError):
+                        total_items_int = None
+                limit_hit = len(fetched_records) >= int(year_config["limit"])
+                if total_items_int is not None:
+                    limit_hit = total_items_int > int(year_config["limit"])
+                coleta_completa = False
+                if total_items_int is not None:
+                    coleta_completa = len(fetched_records) >= total_items_int
+                elif requests_info:
+                    coleta_completa = requests_info[-1].get("records", 0) < int(year_config["page_size"]) and not limit_hit
+                licit_conf = "consolidado" if coleta_completa and licit_errors == 0 else "parcial"
+                licit_obs = []
+                if limit_hit:
+                    licit_obs.append(
+                        f"limite_aplicado={year_config['limit']} para licitacao; aumente PORTAL_TRANSPARENCIA_LIMIT para varredura maior"
+                    )
+                if total_items_int is None:
+                    licit_obs.append("endpoint nao informou total_itens; completude inferida por paginacao")
+                if licit_errors:
+                    licit_obs.append(f"erros_no_ano={licit_errors}")
+                licit_hash_payload = self._json_dump({
+                    "ano": year,
+                    "categoria": "licitacao",
+                    "params_base": self._licitacoes_params(year, 0, year_config["page_size"]),
+                    "hashes_registros": [
+                        hashlib.sha256(self._json_dump(item["record"]).encode("utf-8")).hexdigest()
+                        for item in fetched_records
+                    ],
+                })
+                self._record_snapshot(
+                    db,
+                    categoria="licitacao",
+                    tipo_documento="licitacao",
+                    ano=year,
+                    endpoint=self.LICITACOES_API_URL,
+                    params={
+                        "ano": year,
+                        "limit": year_config["limit"],
+                        "page_size": year_config["page_size"],
+                        "paginas": requests_info,
+                    },
+                    status_code=requests_info[-1]["status_code"] if requests_info else None,
+                    registros_encontrados=total_items_int if total_items_int is not None else len(fetched_records),
+                    registros_coletados=len(fetched_records),
+                    registros_novos=licit_saved,
+                    registros_atualizados=0,
+                    limite_aplicado=year_config["limit"],
+                    total_itens_informado=total_items_int,
+                    hash_conteudo=hashlib.sha256(licit_hash_payload.encode("utf-8")).hexdigest(),
+                    coleta_completa=coleta_completa,
+                    nivel_confiabilidade=licit_conf,
+                    observacoes=licit_obs,
+                )
 
                 financial_stats = self._collect_financial_categories(db, year_config)
                 for category, stats in financial_stats.items():
@@ -1177,6 +1581,55 @@ class PortalTransparenciaCollector:
                         f"registros_salvos={stats.get('salvo', 0)}; duplicados_por_hash={stats.get('hash', 0)}; "
                         f"duplicados_por_chave_composta={stats.get('chave_composta', 0)}; erros={stats.get('erro', 0)}"
                     )
+                    limit_aplicado = stats.get("limite_aplicado")
+                    limit_hit_category = bool(limit_aplicado) and int(found or 0) >= int(limit_aplicado)
+                    if category == "remuneracao_servidores":
+                        limit_hit_category = limit_hit_category or int(stats.get("meses_com_limite", 0)) > 0
+                    category_complete = stats.get("erro", 0) == 0 and found > 0 and not limit_hit_category
+                    category_conf = "consolidado" if category_complete else "parcial"
+                    observations = []
+                    if limit_hit_category:
+                        observations.append(
+                            f"limite_aplicado={limit_aplicado}; retorno pode estar parcial"
+                        )
+                    if stats.get("erro", 0) > 0:
+                        observations.append(f"erros={stats.get('erro', 0)}")
+                    if category == "remuneracao_servidores":
+                        observations.append(
+                            f"meses_consultados={stats.get('meses_consultados', 0)}; "
+                            f"meses_com_limite={stats.get('meses_com_limite', 0)}"
+                        )
+                    snapshot_hash = hashlib.sha256(
+                        self._json_dump(
+                            {
+                                "categoria": category,
+                                "ano": year,
+                                "endpoint": stats.get("endpoint"),
+                                "params": stats.get("params"),
+                                "encontrado": found,
+                                "salvo": stats.get("salvo", 0),
+                            }
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    self._record_snapshot(
+                        db,
+                        categoria=category,
+                        tipo_documento=category,
+                        ano=year,
+                        endpoint=stats.get("endpoint"),
+                        params=stats.get("params") or {},
+                        status_code=stats.get("status_code"),
+                        registros_encontrados=found,
+                        registros_coletados=found,
+                        registros_novos=stats.get("salvo", 0),
+                        registros_atualizados=0,
+                        limite_aplicado=limit_aplicado,
+                        total_itens_informado=None,
+                        hash_conteudo=snapshot_hash,
+                        coleta_completa=category_complete,
+                        nivel_confiabilidade=category_conf,
+                        observacoes=observations,
+                    )
 
             if not any_record_found:
                 details.append("nenhum_registro_real_encontrado_na_janela_configurada=sim")
@@ -1187,7 +1640,10 @@ class PortalTransparenciaCollector:
                 f"duplicados_por_chave_composta={duplicate_composite_count}; ignorados={ignored_count}; "
                 f"erros={error_count}; tempo_total_segundos={elapsed_seconds:.2f}"
             )
-            log_entry.status = "sucesso" if error_count == 0 else "parcial"
+            if not any_record_found:
+                log_entry.status = "falha_coleta"
+            else:
+                log_entry.status = "sucesso" if error_count == 0 else "parcial"
             log_entry.mensagem = "Coleta do Portal da Transparencia finalizada. " + " | ".join(details)
             db.commit()
             logger.info(
@@ -1207,7 +1663,7 @@ class PortalTransparenciaCollector:
             db.rollback()
             full_error = traceback.format_exc()
             logger.error("Erro na coleta do Portal da Transparencia: %s\n%s", error, full_error)
-            log_entry.status = "erro"
+            log_entry.status = "falha_coleta"
             log_entry.mensagem = (
                 f"Erro na coleta do Portal da Transparencia: {error}. "
                 f"Detalhes anteriores: {' | '.join(details)}. Traceback: {full_error}"
