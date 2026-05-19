@@ -187,7 +187,7 @@ As principais configuracoes ficam em `.env.example`.
 | `PORTAL_TRANSPARENCIA_RECEITAS_LIMIT` | Limite de receitas |
 | `FINANCE_DATA_STALE_HOURS` | Janela para alertar coleta antiga no painel e analytics |
 
-Nunca envie o arquivo `.env` para o GitHub. Use apenas `.env.example`.
+
 
 ## Estrutura do projeto
 
